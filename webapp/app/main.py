@@ -10,10 +10,10 @@ Endpoints are grouped by the four product modules:
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 import re
-import shutil
 import threading
 import traceback
 from pathlib import Path
@@ -318,15 +318,47 @@ def api_paper_page(paper_fk: int, page: int) -> dict[str, Any]:
 
 
 @app.post("/api/papers")
-async def api_upload(file: UploadFile = File(...)) -> dict[str, Any]:
+async def api_upload(
+    file: UploadFile = File(...),
+    allow_duplicate: bool = Query(False, description="为 true 时跳过重复校验，强制再传一份"),
+) -> dict[str, Any]:
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(400, "只接受 PDF 文件")
+
+    payload = await file.read()
+    if not payload:
+        raise HTTPException(400, "文件内容为空")
+    content_hash = hashlib.sha256(payload).hexdigest()
+
+    # 重复判定：优先比对文件内容指纹，其次比对原始文件名。
+    # 内容相同但改了名、或同名文件重复拖拽，都能识别出来。
+    if not allow_duplicate:
+        existing = db.one(
+            "SELECT * FROM papers WHERE content_hash = ? AND content_hash != '' ORDER BY id LIMIT 1",
+            (content_hash,),
+        )
+        reason = "content"
+        if not existing:
+            existing = db.one(
+                "SELECT * FROM papers WHERE filename = ? ORDER BY id LIMIT 1", (file.filename,)
+            )
+            reason = "filename"
+        if existing:
+            raise HTTPException(
+                409,
+                {
+                    "code": "duplicate_paper",
+                    "reason": reason,
+                    "filename": file.filename,
+                    "existing": _paper_payload(existing),
+                    "message": f"「{existing['title'] or file.filename}」已存在，是否仍要重复上传？",
+                },
+            )
 
     paper_id = _next_paper_id()
     paper_key = f"paper_{paper_id:03d}"
     target = UPLOAD_DIR / f"{paper_key}.pdf"
-    with target.open("wb") as handle:
-        shutil.copyfileobj(file.file, handle)
+    target.write_bytes(payload)
 
     try:
         paper = load_paper(target)
@@ -338,8 +370,8 @@ async def api_upload(file: UploadFile = File(...)) -> dict[str, Any]:
     paper_fk = db.execute(
         """
         INSERT INTO papers (paper_key, paper_id, title, filename, pdf_path, pages, chars,
-                            n_tables, source, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'upload', ?)
+                            n_tables, content_hash, source, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'upload', ?)
         """,
         (
             paper_key,
@@ -350,6 +382,7 @@ async def api_upload(file: UploadFile = File(...)) -> dict[str, Any]:
             int(stats["pages"]),
             int(stats["chars"]),
             int(stats["tables"]),
+            content_hash,
             now(),
         ),
     )
@@ -892,8 +925,8 @@ def api_seed(run: bool = True) -> dict[str, Any]:
         paper_fk = db.execute(
             """
             INSERT INTO papers (paper_key, paper_id, title, filename, pdf_path, pages, chars,
-                                n_tables, source, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'demo', ?)
+                                n_tables, content_hash, source, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'demo', ?)
             """,
             (
                 paper_key,
@@ -904,6 +937,7 @@ def api_seed(run: bool = True) -> dict[str, Any]:
                 int(stats["pages"]),
                 int(stats["chars"]),
                 int(stats["tables"]),
+                hashlib.sha256(target.read_bytes()).hexdigest(),
                 now(),
             ),
         )
@@ -938,7 +972,14 @@ def index() -> HTMLResponse:
 @app.exception_handler(HTTPException)
 async def http_error(request: Request, exc: HTTPException) -> JSONResponse:
     _ = request
-    return JSONResponse({"error": exc.detail}, status_code=exc.status_code)
+    detail = exc.detail
+    # 结构化 detail（如重复上传确认）整体下发，前端据此弹确认框；
+    # 同时保留 error 字段，兼容只读取文案的旧调用方。
+    if isinstance(detail, dict):
+        body = dict(detail)
+        body.setdefault("error", detail.get("message", "请求失败"))
+        return JSONResponse(body, status_code=exc.status_code)
+    return JSONResponse({"error": detail}, status_code=exc.status_code)
 
 
 if STATIC_DIR.is_dir():

@@ -28,8 +28,19 @@ async function api(path, options = {}) {
   const response = await fetch(path, options);
   if (!response.ok) {
     let detail = `HTTP ${response.status}`;
-    try { detail = (await response.json()).error || detail; } catch (_) { }
-    throw new Error(detail);
+    let payload = null;
+    try {
+      payload = await response.json();
+      detail = payload.error || detail;
+    } catch (_) { }
+    const error = new Error(detail);
+    // 结构化错误（如重复上传）把原始 payload 带给调用方，供其决定交互
+    if (payload && payload.code) {
+      error.code = payload.code;
+      error.payload = payload;
+    }
+    error.status = response.status;
+    throw error;
   }
   return response.status === 204 ? null : response.json();
 }
@@ -140,6 +151,13 @@ function showView(name) {
   if (name === "jobs") loadJobs();
   if (name === "search") runSearch();
   if (name === "compare") loadCompare();
+  // 切到「提取结果」时该视图才真正可见，此刻才能量出候选区宽度。
+  // 不依赖“选中某篇论文”触发重渲染，进入页面即可判断是否需要「展开」。
+  if (name === "review") {
+    const box = $("paperSwitch");
+    const cards = box.querySelectorAll(".switch-card").length;
+    if (cards) requestAnimationFrame(() => syncSwitchOverflow(cards));
+  }
 }
 
 $("nav").addEventListener("click", (event) => {
@@ -164,13 +182,6 @@ async function loadStatus() {
     : "未连接 AI 服务，当前用内置关键词规则抽取：功能完整，但字段较少";
   $("openSettings").textContent = llm.available ? "⚙ 更换 AI 服务" : "⚙ 连接 AI 服务";
   $("openSettings").classList.toggle("call", !llm.available);
-
-  const c = S.status.counts;
-  $("statGrid").innerHTML = `
-    <div class="stat"><b>${c.papers}</b><span>论文</span></div>
-    <div class="stat"><b>${c.records}</b><span>记录</span></div>
-    <div class="stat"><b>${c.reviewed}</b><span>已复核</span></div>
-    <div class="stat"><b>${c.running}</b><span>运行中</span></div>`;
 
   const fieldSelect = $("searchField");
   if (fieldSelect.options.length <= 1) {
@@ -578,17 +589,97 @@ function pollJob(jobId) {
 /* upload                                                              */
 /* ------------------------------------------------------------------ */
 
+/** 弹出「XX 已存在，是否仍要上传」确认框，返回 "upload" | "skip"。 */
+function askDuplicate(info, remaining) {
+  return new Promise((resolve) => {
+    const mask = $("dupMask");
+    const existing = info.existing || {};
+    const name = existing.title || info.filename || "该文献";
+    const reasonText = info.reason === "filename"
+      ? "库中已有同名文件"
+      : "库中已有内容完全相同的文件";
+
+    $("dupQuestion").innerHTML =
+      `「<b>${esc(name)}</b>」已存在，是否要重复上传？`;
+    $("dupSub").textContent = reasonText;
+    $("dupExisting").innerHTML = `
+      <div class="dup-row"><span>已有记录</span><b>${esc(existing.paper_key || "—")}</b></div>
+      <div class="dup-row"><span>原文件名</span><b>${esc(existing.filename || "—")}</b></div>
+      <div class="dup-row"><span>规模</span><b>${existing.pages || 0} 页 · ${existing.n_records || 0} 条记录</b></div>
+      <div class="dup-row"><span>本次文件</span><b>${esc(info.filename || "—")}</b></div>`;
+
+    // 一次选多个文件时，允许一次性决定剩余的重复项
+    const allWrap = $("dupApplyAllWrap");
+    const allBox = $("dupApplyAll");
+    allBox.checked = false;
+    allWrap.hidden = remaining <= 0;
+    if (!allWrap.hidden) {
+      $("dupApplyAllText").textContent = `本批剩余 ${remaining} 个文件中的重复项都按此处理`;
+    }
+
+    mask.hidden = false;
+    const finish = (choice) => {
+      mask.hidden = true;
+      document.removeEventListener("keydown", onKey);
+      resolve({ choice, applyAll: allBox.checked });
+    };
+    const onKey = (e) => {
+      if (e.key === "Escape") finish("skip");
+      if (e.key === "Enter") finish("upload");
+    };
+
+    $("dupConfirm").onclick = () => finish("upload");
+    $("dupSkip").onclick = () => finish("skip");
+    $("dupClose").onclick = () => finish("skip");
+    mask.onclick = (e) => { if (e.target === mask) finish("skip"); };
+    document.addEventListener("keydown", onKey);
+    $("dupConfirm").focus();
+  });
+}
+
+async function postPaper(file, allowDuplicate) {
+  const form = new FormData();
+  form.append("file", file);
+  const path = allowDuplicate ? "/api/papers?allow_duplicate=true" : "/api/papers";
+  return api(path, { method: "POST", body: form });
+}
+
 async function uploadFiles(files) {
-  for (const file of files) {
-    const form = new FormData();
-    form.append("file", file);
+  let bulkChoice = null;   // 勾选「剩余都按此处理」后记住的决定
+  let skipped = 0;
+
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
     try {
-      const paper = await api("/api/papers", { method: "POST", body: form });
+      const paper = await postPaper(file, false);
       toast(`${paper.paper_key} 已解析：${paper.pages} 页，可在“待抽取”中启动任务`);
     } catch (error) {
-      toast(`${file.name}：${error.message}`, "err");
+      if (error.code !== "duplicate_paper") {
+        toast(`${file.name}：${error.message}`, "err");
+        continue;
+      }
+
+      let choice = bulkChoice;
+      if (!choice) {
+        const answer = await askDuplicate(error.payload, files.length - i - 1);
+        choice = answer.choice;
+        if (answer.applyAll) bulkChoice = choice;
+      }
+
+      if (choice === "skip") {
+        skipped += 1;
+        continue;
+      }
+      try {
+        const paper = await postPaper(file, true);
+        toast(`${paper.paper_key} 已重复上传：${paper.pages} 页`, "warn");
+      } catch (retryError) {
+        toast(`${file.name}：${retryError.message}`, "err");
+      }
     }
   }
+
+  if (skipped) toast(`已跳过 ${skipped} 个重复文献`, "warn");
   await loadPapers();
   await loadStatus();
 }
@@ -918,6 +1009,11 @@ function syncSwitchOverflow(total) {
     more.textContent = "收起";
     return;
   }
+
+  // 视图被 display:none 隐藏时量不到宽度（clientWidth 为 0），
+  // 此时不能据此判定“没有溢出”，否则按钮会被永久藏起来，
+  // 直到某次在可见状态下重新渲染才出现。保留当前状态，等视图可见再量。
+  if (!box.clientWidth) return;
 
   // 折叠时是 nowrap，溢出表现为横向超宽
   const overflowing = box.scrollWidth > box.clientWidth + 2;
@@ -1521,8 +1617,37 @@ $("jobTable").addEventListener("click", async (event) => {
 /* ask panel                                                           */
 /* ------------------------------------------------------------------ */
 
-$("askToggle").addEventListener("click", () => $("askPanel").classList.toggle("open"));
-$("askClose").addEventListener("click", () => $("askPanel").classList.remove("open"));
+/* AI 助手常驻右侧第三栏，折叠状态记在本地，刷新后保持 */
+const ASK_KEY = "cheminfo-ask-collapsed";
+
+function setAskCollapsed(collapsed) {
+  document.querySelector(".app").classList.toggle("ask-collapsed", collapsed);
+  $("askCollapse").setAttribute("aria-expanded", String(!collapsed));
+  $("askToggle").setAttribute("aria-pressed", String(!collapsed));
+  $("askToggle").title = collapsed ? "展开 AI 助手" : "收起 AI 助手";
+  try { localStorage.setItem(ASK_KEY, collapsed ? "1" : "0"); } catch (_) { }
+}
+
+function askCollapsed() {
+  return document.querySelector(".app").classList.contains("ask-collapsed");
+}
+
+(function initAskPanel() {
+  let saved = null;
+  try { saved = localStorage.getItem(ASK_KEY); } catch (_) { }
+  // 窄屏首次访问默认收起，避免主工作区被挤扁
+  const narrow = window.matchMedia && window.matchMedia("(max-width: 860px)").matches;
+  setAskCollapsed(saved === null ? narrow : saved === "1");
+})();
+
+// 顶栏按钮、面板折叠按钮、折叠后的竖条共用同一套状态
+$("askToggle").addEventListener("click", () => setAskCollapsed(!askCollapsed()));
+$("askCollapse").addEventListener("click", () => setAskCollapsed(true));
+$("askExpand").addEventListener("click", () => {
+  setAskCollapsed(false);
+  $("askInput").focus();
+});
+
 $("askScope").addEventListener("change", (event) => {
   const option = event.target.selectedOptions[0];
   $("askScopeLabel").textContent = option ? option.textContent : "全部论文";

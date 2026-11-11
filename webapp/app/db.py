@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS papers (
     pages         INTEGER NOT NULL DEFAULT 0,
     chars         INTEGER NOT NULL DEFAULT 0,
     n_tables      INTEGER NOT NULL DEFAULT 0,
+    content_hash  TEXT NOT NULL DEFAULT '',
     source        TEXT NOT NULL DEFAULT 'upload',
     created_at    TEXT NOT NULL
 );
@@ -80,6 +81,16 @@ CREATE INDEX IF NOT EXISTS idx_jobs_paper ON jobs(paper_fk);
 CREATE INDEX IF NOT EXISTS idx_pages_paper ON paper_pages(paper_fk);
 """
 
+# 旧库升级：CREATE TABLE IF NOT EXISTS 不会给已存在的表补列，
+# 这里按「列名 -> ALTER 语句」做一次幂等迁移。
+MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    ("papers", "content_hash", "ALTER TABLE papers ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''"),
+)
+
+POST_MIGRATION_SQL = (
+    "CREATE INDEX IF NOT EXISTS idx_papers_hash ON papers(content_hash)",
+)
+
 _LOCK = threading.Lock()
 
 
@@ -93,6 +104,17 @@ class Database:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as conn:
             conn.executescript(SCHEMA)
+            self._migrate(conn)
+
+    @staticmethod
+    def _migrate(conn: sqlite3.Connection) -> None:
+        """Add columns missing from databases created by earlier versions."""
+        for table, column, statement in MIGRATIONS:
+            columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+            if column not in columns:
+                conn.execute(statement)
+        for statement in POST_MIGRATION_SQL:
+            conn.execute(statement)
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
