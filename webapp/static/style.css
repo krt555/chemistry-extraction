@@ -82,13 +82,11 @@ button, input, select { font-family: inherit; font-size: inherit; color: inherit
 
 .app {
   display: grid;
-  /* 第三栏是常驻的 AI 助手；折叠时整列收成一条细轨道 */
-  grid-template-columns: 236px minmax(0, 1fr) var(--ask-w, 376px);
+  /* 两栏：侧边导航 + 主工作区。AI 助手已独立为首页视图 */
+  grid-template-columns: 236px minmax(0, 1fr);
   height: 100vh;
   overflow: hidden;
-  transition: grid-template-columns 0.22s ease;
 }
-.app.ask-collapsed { --ask-w: 44px; }
 
 /* ---------------- sidebar ---------------- */
 
@@ -386,8 +384,100 @@ button, input, select { font-family: inherit; font-size: inherit; color: inherit
   min-height: calc(2 * 1.45em);
 }
 .paper-dims { display: flex; flex-wrap: wrap; gap: 10px; font-size: 11px; color: var(--text-dim); }
+.paper-has-summary { color: var(--accent); }
+
+/* 自定义命名标记：提示当前显示名已被人工改写 */
+.paper-renamed {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 20px;
+  background: var(--accent-dim);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* 悬停可看简易总结：标题带下划虚线，暗示它是可悬停的 */
+.paper-title[data-brief] {
+  cursor: help;
+  text-decoration: underline dotted transparent;
+  text-underline-offset: 3px;
+}
+.paper-title[data-brief]:hover {
+  text-decoration-color: var(--accent);
+  color: var(--accent);
+}
+
+/* 备注：卡片上只显示两行，完整内容在悬停速览和命名弹窗里 */
+.paper-note {
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text-dim);
+  background: var(--panel-2);
+  border-left: 2px solid var(--line);
+  border-radius: 0 6px 6px 0;
+  padding: 6px 9px;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+
+/* ---------------- hover brief (简易版总结) ---------------- */
+
+.hover-brief {
+  position: fixed;
+  z-index: 90;
+  width: min(340px, 86vw);
+  padding: 11px 13px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 14px 34px var(--shadow);
+  font-size: 12px;
+  line-height: 1.65;
+  pointer-events: none;
+}
+.hb-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.hb-key { font-size: 11px; font-weight: 700; color: var(--accent); letter-spacing: 0.3px; }
+.hb-dims { font-size: 10.5px; color: var(--text-mute); font-variant-numeric: tabular-nums; }
+.hb-title { margin-top: 4px; font-size: 12.5px; font-weight: 600; color: var(--text); }
+.hb-origin { margin-top: 2px; font-size: 10.5px; color: var(--text-mute); }
+.hb-brief { margin-top: 7px; color: var(--text-dim); }
+.hb-brief.empty { color: var(--text-mute); font-style: italic; }
+.hb-note {
+  margin-top: 8px; padding-top: 7px;
+  border-top: 1px dashed var(--line);
+  color: var(--text-dim); font-size: 11.5px;
+}
+.hb-note b { color: var(--text-mute); font-weight: 600; margin-right: 6px; }
+
+/* ---------------- summary modal ---------------- */
+
+.summary-modal { max-width: 640px; }
+.summary-brief {
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  background: var(--accent-dim);
+  border-left: 2px solid var(--accent);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--text);
+}
+.summary-text { font-size: 13px; line-height: 1.8; color: var(--text-dim); }
+.summary-text p { margin: 0 0 7px; }
+.summary-text p:last-child { margin-bottom: 0; }
+
+.note-input {
+  width: 100%;
+  resize: vertical;
+  min-height: 72px;
+  line-height: 1.6;
+}
+
+
 /* Push the controls to the bottom so every card's buttons line up. */
 .paper-actions { display: flex; gap: 6px; margin-top: auto; align-items: center; }
+/* 第二行动作：总结 / 命名 / 删除，不与抽取主操作争夺视线 */
+.paper-actions.second { margin-top: 0; }
+.paper-actions.second .btn { flex: 1 1 0; justify-content: center; }
 .paper-actions .select {
   flex: 1 1 auto;
   min-width: 0;
@@ -815,77 +905,55 @@ button, input, select { font-family: inherit; font-size: inherit; color: inherit
 /* 缺失值占位符与数字同在右侧基准线上 */
 .data-table td.num .null { display: inline-block; }
 
-/* ---------------- ask panel ---------------- */
+/* ---------------- ask view (首页) ---------------- */
 
-/* 常驻第三栏：不再是悬浮抽屉，折叠时收成右侧竖条 */
-.ask-panel {
-  position: relative;
-  min-width: 0;
-  background: var(--bg-soft);
-  border-left: 1px solid var(--line);
-  display: flex; flex-direction: column;
-  overflow: hidden;
-}
+/* AI 助手是独立首页视图：整屏对话，输入框固定在底部 */
+#view-ask.view { padding: 0; overflow: hidden; }
 
-/* 折叠态：面板内容整体隐藏，只留竖条 */
-.app.ask-collapsed .ask-head,
-.app.ask-collapsed .ask-scope,
-.app.ask-collapsed .ask-body,
-.app.ask-collapsed .ask-form { display: none; }
-
-.ask-rail { display: none; }
-.app.ask-collapsed .ask-rail {
+.ask-page {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  justify-content: flex-start;
-  gap: 10px;
-  width: 100%; height: 100%;
-  padding: 16px 0;
-  background: transparent;
-  border: 0;
-  color: var(--text-dim);
-  cursor: pointer;
-  transition: color 0.15s, background 0.15s;
-}
-.app.ask-collapsed .ask-rail:hover { color: var(--accent); background: var(--panel-2); }
-.ask-rail-ico { font-size: 16px; line-height: 1; }
-.ask-rail-text {
-  writing-mode: vertical-rl;
-  font-size: 12px;
-  letter-spacing: 2px;
+  height: 100%;
+  min-height: 0;
 }
 
-.ask-head {
+.ask-page-head {
   display: flex; align-items: center; justify-content: space-between;
-  padding: 14px 16px;
-  border-bottom: 1px solid var(--line);
+  gap: 12px;
+  padding: 14px 24px;
+  border-bottom: 1px solid var(--line-soft);
   flex: none;
 }
-.ask-head-text { min-width: 0; }
-.ask-collapse { font-size: 15px; line-height: 1; }
-.ask-head strong { display: block; font-size: 14px; }
-.ask-head span { font-size: 11px; color: var(--text-mute); }
-.ask-scope { padding: 10px 16px 0; flex: none; }
-.ask-scope .select { width: 100%; }
+.ask-scope { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.ask-scope-label { font-size: 12px; color: var(--text-mute); flex: none; }
+.ask-scope .select { min-width: 280px; max-width: 460px; }
+.ask-scope-note { font-size: 11.5px; color: var(--text-mute); }
 
-.ask-body { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 12px; }
+.ask-body {
+  flex: 1; min-height: 0; overflow-y: auto;
+  padding: 20px 24px;
+  display: flex; flex-direction: column; gap: 14px;
+}
+/* 宽屏下限制气泡行宽，长回答不至于横跨整屏难以阅读 */
+.ask-body > * { max-width: 920px; width: 100%; align-self: center; }
 
-.ask-msg { font-size: 12.5px; line-height: 1.7; }
+.ask-msg { font-size: 13px; line-height: 1.75; }
 .ask-msg p { margin: 0 0 6px; }
+/* 用户气泡：靠右显示，但仍受 920px 行宽约束（外层已 align-self:center） */
 .ask-msg.user {
-  align-self: flex-end;
-  max-width: 85%;
+  margin-left: auto;
+  width: fit-content;
+  max-width: 78%;
   background: var(--accent);
   color: var(--accent-ink);
-  padding: 8px 12px;
+  padding: 9px 13px;
   border-radius: 12px 12px 3px 12px;
   font-weight: 500;
 }
 .ask-msg.bot {
   background: var(--panel);
   border: 1px solid var(--line-soft);
-  padding: 11px 13px;
+  padding: 14px 16px;
   border-radius: 12px 12px 12px 3px;
   color: var(--text-dim);
 }
@@ -899,7 +967,7 @@ button, input, select { font-family: inherit; font-size: inherit; color: inherit
   border-left: 2px solid var(--accent);
   border-radius: 0 6px 6px 0;
   padding: 7px 9px;
-  font-size: 11px;
+  font-size: 11.5px;
   line-height: 1.6;
   color: var(--text-mute);
   cursor: pointer;
@@ -913,13 +981,19 @@ button, input, select { font-family: inherit; font-size: inherit; color: inherit
   background: var(--panel-2);
   border: 1px solid var(--line);
   border-radius: 20px;
-  font-size: 11px;
+  font-size: 11.5px;
   color: var(--text-dim);
   cursor: pointer;
 }
 .chip:hover { border-color: var(--accent); color: var(--accent); }
 
-.ask-form { display: flex; gap: 7px; padding: 12px 16px; border-top: 1px solid var(--line); flex: none; }
+.ask-form {
+  display: flex; gap: 8px;
+  padding: 14px 24px;
+  border-top: 1px solid var(--line);
+  flex: none;
+  background: var(--bg);
+}
 .ask-form .input { flex: 1; min-width: 0; }
 
 .typing { display: inline-flex; gap: 3px; }
@@ -1260,12 +1334,10 @@ button, input, select { font-family: inherit; font-size: inherit; color: inherit
 
 @media (max-width: 1180px) {
   .compare-layout { grid-template-columns: 240px minmax(0, 1fr); }
-  /* 中等宽度下让出工作区空间，AI 助手窄一些 */
-  .app { grid-template-columns: 236px minmax(0, 1fr) var(--ask-w, 320px); }
 }
 
 @media (max-width: 1100px) {
-  .app { grid-template-columns: 64px minmax(0, 1fr) var(--ask-w, 300px); }
+  .app { grid-template-columns: 64px minmax(0, 1fr); }
   .brand-text, .nav-text, .engine-row, .engine-card p, .theme-btn { display: none; }
   .sidebar { padding: 18px 8px 16px; align-items: center; }
   .nav { width: 100%; }
@@ -1320,18 +1392,10 @@ button, input, select { font-family: inherit; font-size: inherit; color: inherit
   }
 }
 
-/* 很窄的屏幕：AI 助手浮在工作区之上，避免把主区挤没 */
+/* 很窄的屏幕：问答范围选择换行排布，避免下拉把标题挤出可视区 */
 @media (max-width: 860px) {
-  .app { grid-template-columns: 64px minmax(0, 1fr); }
-  .ask-panel {
-    position: fixed;
-    top: 0; right: 0; bottom: 0;
-    width: min(360px, 86vw);
-    z-index: 40;
-    box-shadow: -16px 0 44px var(--shadow);
-  }
-  .app.ask-collapsed .ask-panel {
-    width: 44px;
-    box-shadow: none;
-  }
+  .ask-page-head { flex-direction: column; align-items: flex-start; gap: 8px; }
+  .ask-scope { width: 100%; }
+  .ask-scope .select { min-width: 0; flex: 1; }
+  .ask-body, .ask-form, .ask-page-head { padding-left: 14px; padding-right: 14px; }
 }

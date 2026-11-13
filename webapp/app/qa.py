@@ -172,8 +172,48 @@ def best_snippet(text: str, query: list[str], width: int = 300) -> str:
 
 ANSWER_SYSTEM = (
     "你是材料化学文献助手。只能依据给定的页面片段回答，不得补充片段之外的事实。"
-    "用中文回答，简洁准确。每个结论句末必须标注来源，格式为 [p.页码]。"
+    "全程用中文作答，英文术语、化学式与数值保留原样即可。"
+    "回答必须分两段：第一段以「**内容总结**：」开头，用 1-3 句中文概括检索到的片段讲了什么；"
+    "第二段以「**详细回答**：」开头，给出针对问题的具体结论，每个结论句末标注来源，格式为 [p.页码]。"
     "若片段不足以回答，直接说明“检索到的页面中没有相关信息”。"
+)
+
+
+def _extractive_digest(question: str, hits: list[dict[str, Any]]) -> str:
+    """One Chinese sentence describing what the retrieved pages cover.
+
+    The offline path must not invent an answer, so the digest only states
+    which papers/pages matched and which topics their text touches — all of
+    it derived from the retrieved snippets, never from the model.
+    """
+    papers = sorted({hit["paper_key"] for hit in hits})
+    pages = sorted({hit["page"] for hit in hits})
+    page_list = "、".join(str(p) for p in pages)
+    # 中文与半角编号/数字相接处补一个空格，保证两种分支读起来都顺。
+    if len(papers) == 1:
+        where = f"共在 {papers[0]} 的第 {page_list} 页中"
+    else:
+        where = f"共在 {len(papers)} 篇论文的第 {page_list} 页中"
+
+    blob = " ".join(hit["snippet"] for hit in hits).lower()
+    topics = [name for pattern, name in _DIGEST_TOPICS if re.search(pattern, blob)]
+    what = "、".join(topics[:4]) if topics else "该问题相关的合成与表征描述"
+    return (
+        f"**内容总结**：围绕「{question.strip()}」，{where}检索到相关原文，"
+        f"内容涉及{what}。"
+    )
+
+
+# 片段主题 -> 中文说法，用于抽取式回答的开头概括。
+_DIGEST_TOPICS: tuple[tuple[str, str], ...] = (
+    (r"surface area|bet\b|m2/g|m²/g", "比表面积"),
+    (r"pore (size|diameter|volume)|bjh|\bnm\b", "孔径/孔容"),
+    (r"surfactant|p123|f127|ctab|template|copolymer", "模板剂与表面活性剂"),
+    (r"teos|silica source|tmos|orthosilicate", "硅源"),
+    (r"calcin|aged|aging|hydrothermal|autoclave|°c", "温度程序与水热/煅烧条件"),
+    (r"hexagonal|cubic|p6mm|im3m|mesostructur", "介孔结构与空间群"),
+    (r"morpholog|sem|tem|spher|fiber|rod-like|film", "产物形貌"),
+    (r"\bhcl\b|\bph\b|acid|naoh|ammonia", "酸碱条件"),
 )
 
 
@@ -223,8 +263,11 @@ def build_answer(question: str, hits: list[dict[str, Any]], llm_available: bool)
         except Exception as exc:  # degrade to extractive answer
             _ = exc
 
-    lines = [f"根据检索到的 {len(hits)} 个页面片段："]
+    lines = [
+        _extractive_digest(question, hits),
+        "",
+        f"**详细回答**：以下是最相关的 {len(hits)} 段原文（未配置 AI，当前为抽取式回答，直接返回原文片段）：",
+    ]
     for hit in hits:
         lines.append(f"· {hit['snippet']} [p.{hit['page']}]")
-    lines.append("（未配置 LLM，当前为抽取式回答：直接返回最相关原文片段。）")
     return {"answer": "\n".join(lines), "citations": citations, "engine": "retrieval"}

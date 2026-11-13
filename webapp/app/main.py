@@ -38,6 +38,7 @@ from .extraction import (
     verify_evidence,
 )
 from .qa import Retriever, build_answer
+from .summarize import build_summary
 from .settings import (
     SettingsError,
     apply_profile,
@@ -102,6 +103,16 @@ def _paper_payload(row: dict[str, Any]) -> dict[str, Any]:
         "paper_key": row["paper_key"],
         "paper_id": row["paper_id"],
         "title": row["title"],
+        # 自定义命名后仍要能看到入库时的原始名，便于核对是哪份 PDF
+        "original_title": row.get("original_title") or row["title"],
+        "renamed": bool(
+            (row.get("original_title") or "") and row["title"] != row.get("original_title")
+        ),
+        "note": row.get("note") or "",
+        "summary": row.get("summary") or "",
+        "summary_brief": row.get("summary_brief") or "",
+        "summary_engine": row.get("summary_engine") or "",
+        "summary_at": row.get("summary_at") or "",
         "filename": row["filename"],
         "pages": row["pages"],
         "chars": row["chars"],
@@ -367,16 +378,18 @@ async def api_upload(
         raise HTTPException(400, f"PDF 解析失败：{exc}") from exc
 
     stats = paper.stats()
+    title = _safe_title(file.filename)
     paper_fk = db.execute(
         """
-        INSERT INTO papers (paper_key, paper_id, title, filename, pdf_path, pages, chars,
-                            n_tables, content_hash, source, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'upload', ?)
+        INSERT INTO papers (paper_key, paper_id, title, original_title, filename, pdf_path,
+                            pages, chars, n_tables, content_hash, source, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'upload', ?)
         """,
         (
             paper_key,
             paper_id,
-            _safe_title(file.filename),
+            title,
+            title,
             file.filename,
             str(target.relative_to(ROOT)).replace("\\", "/"),
             int(stats["pages"]),
@@ -387,6 +400,74 @@ async def api_upload(
         ),
     )
     _store_pages(paper_fk, paper.pages_with_tables)
+    return _paper_payload(_paper_row(paper_fk))
+
+
+TITLE_MAX = 200
+NOTE_MAX = 2000
+
+
+@app.patch("/api/papers/{paper_fk}")
+async def api_rename_paper(paper_fk: int, request: Request) -> dict[str, Any]:
+    """Custom display name and free-form note for one paper.
+
+    ``title`` empty (or omitted together with a ``reset_title`` flag) restores
+    the name produced at import time, so a rename is never destructive.
+    """
+    row = _paper_row(paper_fk)
+    body = await request.json()
+
+    original = row.get("original_title") or row["title"]
+    updates: dict[str, Any] = {}
+
+    if body.get("reset_title"):
+        updates["title"] = original
+    elif "title" in body:
+        title = re.sub(r"\s+", " ", str(body.get("title") or "")).strip()[:TITLE_MAX]
+        updates["title"] = title or original
+
+    if "note" in body:
+        updates["note"] = str(body.get("note") or "").strip()[:NOTE_MAX]
+
+    if not updates:
+        raise HTTPException(400, "没有需要更新的字段（title / note）")
+
+    assignments = ", ".join(f"{key} = ?" for key in updates)
+    db.execute(
+        f"UPDATE papers SET {assignments}, original_title = ? WHERE id = ?",
+        (*updates.values(), original, paper_fk),
+    )
+    return _paper_payload(_paper_row(paper_fk))
+
+
+@app.post("/api/papers/{paper_fk}/summary")
+def api_build_summary(paper_fk: int, refresh: bool = Query(True)) -> dict[str, Any]:
+    """Generate (or return the cached) content summary for one paper."""
+    row = _paper_row(paper_fk)
+    if not refresh and (row.get("summary") or ""):
+        return _paper_payload(row)
+
+    pages = [
+        item["text"]
+        for item in db.query(
+            "SELECT text FROM paper_pages WHERE paper_fk = ? ORDER BY page", (paper_fk,)
+        )
+    ]
+    if not any((page or "").strip() for page in pages):
+        raise HTTPException(400, "这篇论文还没有可用的正文文本，无法生成总结")
+
+    records = [
+        _record_payload(item)
+        for item in db.query(
+            "SELECT * FROM records WHERE paper_fk = ? ORDER BY record_index", (paper_fk,)
+        )
+    ]
+    result = build_summary(title=row["title"], pages=pages, records=records)
+    db.execute(
+        "UPDATE papers SET summary = ?, summary_brief = ?, summary_engine = ?,"
+        " summary_at = ? WHERE id = ?",
+        (result["summary"], result["brief"], result["engine"], now(), paper_fk),
+    )
     return _paper_payload(_paper_row(paper_fk))
 
 
@@ -924,13 +1005,14 @@ def api_seed(run: bool = True) -> dict[str, Any]:
         stats = paper.stats()
         paper_fk = db.execute(
             """
-            INSERT INTO papers (paper_key, paper_id, title, filename, pdf_path, pages, chars,
-                                n_tables, content_hash, source, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'demo', ?)
+            INSERT INTO papers (paper_key, paper_id, title, original_title, filename, pdf_path,
+                                pages, chars, n_tables, content_hash, source, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'demo', ?)
             """,
             (
                 paper_key,
                 paper_id,
+                item["title"],
                 item["title"],
                 item["filename"],
                 str(target.relative_to(ROOT)).replace("\\", "/"),

@@ -6,6 +6,7 @@ guarantees, evidence grounding, retrieval ranking and the export contract.
 
 from __future__ import annotations
 
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -17,7 +18,8 @@ for extra in (ROOT, ROOT / "src"):
 
 from webapp.app.demo import DEMO_PAPERS
 from webapp.app.heuristic import extract_records_heuristic
-from webapp.app.qa import Retriever, best_snippet, expand_query
+from webapp.app.qa import Retriever, best_snippet, build_answer, expand_query
+from webapp.app.summarize import BRIEF_LIMIT, build_summary
 
 
 SBA15 = DEMO_PAPERS[0]["pages"]
@@ -178,6 +180,120 @@ class ExportContractTest(unittest.TestCase):
         self.assertEqual(report["errors"], [])
         self.assertTrue(report["ok"])
         self.assertEqual(report["evidence_coverage"], 1.0)
+
+
+class SummaryTest(unittest.TestCase):
+    """Offline summaries: the hover brief and the full "内容总结" body."""
+
+    def build(self, pages):
+        records, _ = extract_records_heuristic(pages)
+        return build_summary(title="demo", pages=pages, records=records)
+
+    def test_offline_engine_is_used_without_a_key(self):
+        self.assertEqual(self.build(SBA15)["engine"], "heuristic")
+
+    def test_brief_is_a_single_capped_line(self):
+        """The brief renders inside a hover tooltip, so it must not wrap away."""
+        for pages in (SBA15, SBA16, FILM):
+            brief = self.build(pages)["brief"]
+            self.assertTrue(brief)
+            self.assertNotIn("\n", brief)
+            self.assertLessEqual(len(brief), BRIEF_LIMIT)
+
+    def test_brief_names_the_material_and_key_metrics(self):
+        brief = self.build(SBA15)["brief"]
+        self.assertIn("P123", brief)
+        self.assertIn("820", brief)
+        self.assertIn("m²/g", brief)
+
+    def test_full_summary_lists_extracted_conditions(self):
+        summary = self.build(SBA15)["summary"]
+        self.assertIn("1 条样品记录", summary)
+        self.assertIn("表面活性剂：Pluronic P123", summary)
+        self.assertIn("硅源", summary)
+
+    def test_summary_opens_with_a_chinese_overview(self):
+        summary = self.build(SBA15)["summary"]
+        self.assertTrue(summary.startswith("本文"))
+        self.assertIn("为模板剂", summary)
+        self.assertIn("介孔材料", summary)
+
+    def test_results_are_reported_in_chinese_with_units(self):
+        summary = self.build(SBA15)["summary"]
+        self.assertIn("表征结果：", summary)
+        self.assertIn("比表面积约 820 m²/g", summary)
+        self.assertIn("孔径约 7.8 nm", summary)
+
+    def test_english_vocabulary_is_translated(self):
+        """The offline summary must read as Chinese, not Chinese labels + English values."""
+        summary = self.build(FILM)["summary"]
+        self.assertNotIn("film/monolith", summary)
+        self.assertNotIn("calcination", summary)
+        self.assertIn("二维六方", summary)
+
+    def test_summary_carries_no_english_prose(self):
+        """No English sentences may be quoted verbatim any more."""
+        for pages in (SBA15, SBA16, FILM):
+            for line in self.build(pages)["summary"].splitlines():
+                words = re.findall(r"[A-Za-z]{3,}", line)
+                self.assertLessEqual(
+                    len(words), 6, f"line looks like English prose: {line}"
+                )
+
+    def test_empty_paper_degrades_without_raising(self):
+        result = build_summary(title="标题兜底", pages=["", "   "], records=[])
+        self.assertEqual(result["engine"], "heuristic")
+        self.assertEqual(result["brief"], "标题兜底")
+        self.assertIn("暂无可用于总结的文本内容", result["summary"])
+
+    def test_text_without_extractable_content_explains_itself(self):
+        result = build_summary(
+            title="T",
+            pages=["Macroeconomic policy and interest rates are debated in this essay."],
+            records=[],
+        )
+        self.assertIn("未能从正文中提取", result["summary"])
+
+
+class AnswerFormatTest(unittest.TestCase):
+    """The assistant must lead every answer with a Chinese summary."""
+
+    def hits(self):
+        chunks = []
+        for index, item in enumerate(DEMO_PAPERS, 1):
+            for page, text in enumerate(item["pages"], 1):
+                chunks.append(
+                    {
+                        "paper_fk": index,
+                        "paper_key": f"paper_{index:03d}",
+                        "title": item["title"],
+                        "page": page,
+                        "text": text,
+                    }
+                )
+        return Retriever(chunks).search("比表面积是多少？", top_k=3)
+
+    def test_extractive_answer_starts_with_a_chinese_digest(self):
+        result = build_answer("比表面积是多少？", self.hits(), llm_available=False)
+        self.assertTrue(result["answer"].startswith("**内容总结**："))
+        self.assertIn("**详细回答**：", result["answer"])
+
+    def test_digest_names_the_matched_topics(self):
+        answer = build_answer("比表面积是多少？", self.hits(), llm_available=False)["answer"]
+        digest = answer.splitlines()[0]
+        self.assertIn("比表面积", digest)
+        self.assertIn("比表面积是多少？", digest)
+
+    def test_citations_still_accompany_the_answer(self):
+        result = build_answer("比表面积是多少？", self.hits(), llm_available=False)
+        self.assertTrue(result["citations"])
+        for citation in result["citations"]:
+            self.assertIn("page", citation)
+
+    def test_empty_retrieval_still_answers_in_chinese(self):
+        result = build_answer("股票收益率", [], llm_available=False)
+        self.assertIn("没有相关信息", result["answer"])
+        self.assertEqual(result["citations"], [])
 
 
 if __name__ == "__main__":

@@ -19,6 +19,12 @@ CREATE TABLE IF NOT EXISTS papers (
     paper_key     TEXT NOT NULL UNIQUE,
     paper_id      INTEGER NOT NULL,
     title         TEXT NOT NULL DEFAULT '',
+    original_title TEXT NOT NULL DEFAULT '',
+    note          TEXT NOT NULL DEFAULT '',
+    summary       TEXT NOT NULL DEFAULT '',
+    summary_brief TEXT NOT NULL DEFAULT '',
+    summary_engine TEXT NOT NULL DEFAULT '',
+    summary_at    TEXT NOT NULL DEFAULT '',
     filename      TEXT NOT NULL DEFAULT '',
     pdf_path      TEXT NOT NULL DEFAULT '',
     pages         INTEGER NOT NULL DEFAULT 0,
@@ -85,6 +91,14 @@ CREATE INDEX IF NOT EXISTS idx_pages_paper ON paper_pages(paper_fk);
 # 这里按「列名 -> ALTER 语句」做一次幂等迁移。
 MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("papers", "content_hash", "ALTER TABLE papers ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''"),
+    # 自定义命名与备注：title 可被用户改写，original_title 保留入库时的原始名
+    ("papers", "original_title", "ALTER TABLE papers ADD COLUMN original_title TEXT NOT NULL DEFAULT ''"),
+    ("papers", "note", "ALTER TABLE papers ADD COLUMN note TEXT NOT NULL DEFAULT ''"),
+    # 内容总结：brief 供悬停速览，summary 为完整版
+    ("papers", "summary", "ALTER TABLE papers ADD COLUMN summary TEXT NOT NULL DEFAULT ''"),
+    ("papers", "summary_brief", "ALTER TABLE papers ADD COLUMN summary_brief TEXT NOT NULL DEFAULT ''"),
+    ("papers", "summary_engine", "ALTER TABLE papers ADD COLUMN summary_engine TEXT NOT NULL DEFAULT ''"),
+    ("papers", "summary_at", "ALTER TABLE papers ADD COLUMN summary_at TEXT NOT NULL DEFAULT ''"),
 )
 
 POST_MIGRATION_SQL = (

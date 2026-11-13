@@ -23,7 +23,13 @@
       <!-- data-tip 用于窄屏折叠态的悬停提示：此时文字标签被隐藏，只剩图标 -->
       <nav class="nav" id="nav">
         <!-- 导航图标统一为 16px 线性 SVG：同一套线宽与圆角，语义对应栏目名 -->
-        <button class="nav-item active" data-view="library" data-tip="文献库">
+        <button class="nav-item active" data-view="ask" data-tip="AI 助手">
+          <span class="nav-ico" aria-hidden="true">
+            <!-- 对话气泡 + 星点：首页的 AI 问答 -->
+            <svg viewBox="0 0 16 16"><path d="M13.4 9.3a1.3 1.3 0 0 1-1.3 1.3H5.4L2.6 13.4V3.6a1.3 1.3 0 0 1 1.3-1.3h8.2a1.3 1.3 0 0 1 1.3 1.3Z"/><path d="M8 4.9v3.4"/><path d="M6.3 6.6h3.4"/></svg>
+          </span><span class="nav-text">AI 助手</span>
+        </button>
+        <button class="nav-item" data-view="library" data-tip="文献库">
           <span class="nav-ico" aria-hidden="true">
             <!-- 摊开的书：文献收藏 -->
             <svg viewBox="0 0 16 16"><path d="M8 4.1C6.5 3 4.6 2.8 2.6 3.3v8.6c2-.5 3.9-.3 5.4.8 1.5-1.1 3.4-1.3 5.4-.8V3.3C11.4 2.8 9.5 3 8 4.1Z"/><path d="M8 4.1v9.2"/></svg>
@@ -81,11 +87,40 @@
             <span>＋ 上传 PDF</span>
             <input id="fileInput" type="file" accept="application/pdf" multiple hidden />
           </label>
-          <button class="btn" id="askToggle" aria-pressed="true">AI 助手</button>
         </div>
       </header>
 
-      <section class="view active" id="view-library">
+      <!-- AI 助手独立成首页：整屏对话，不再挤在右侧细栏里 -->
+      <section class="view active" id="view-ask">
+        <div class="ask-page">
+          <div class="ask-page-head">
+            <div class="ask-scope">
+              <span class="ask-scope-label">问答范围</span>
+              <select class="select" id="askScope">
+                <option value="">全部论文</option>
+              </select>
+            </div>
+            <span class="ask-scope-note" id="askScopeLabel">全部论文</span>
+          </div>
+          <div class="ask-body" id="askBody">
+            <div class="ask-msg bot">
+              <p>你可以这样问：</p>
+              <div class="chips">
+                <button class="chip">比表面积最高的样品是多少？</button>
+                <button class="chip">用了什么表面活性剂？</button>
+                <button class="chip">煅烧温度和时间是多少？</button>
+              </div>
+              <p class="muted">只依据已上传论文的原文作答，不会凭空编造。每条回答都附带页码引文，点击即可跳到原文。</p>
+            </div>
+          </div>
+          <form class="ask-form" id="askForm">
+            <input class="input" id="askInput" placeholder="围绕论文提问…" autocomplete="off" />
+            <button class="btn primary" type="submit">发送</button>
+          </form>
+        </div>
+      </section>
+
+      <section class="view" id="view-library">
         <!-- 首次使用的三步指引：新手最容易卡在“上传完之后该干什么” -->
         <div class="guide-bar" id="guideBar">
           <div class="guide-step"><b>1</b><span>上传 PDF</span><em>英文化学论文，可一次选多篇</em></div>
@@ -335,43 +370,67 @@
       </section>
     </main>
 
-    <!-- AI 助手常驻第三栏：点标题栏的折叠按钮收成右侧细条 -->
-    <aside class="ask-panel" id="askPanel">
-      <div class="ask-head">
-        <div class="ask-head-text">
-          <strong>AI 助手</strong>
-          <span id="askScopeLabel">全部论文</span>
-        </div>
-        <button class="icon-btn ask-collapse" id="askCollapse"
-                title="收起 AI 助手" aria-label="收起 AI 助手" aria-expanded="true">›</button>
-      </div>
-      <div class="ask-scope">
-        <select class="select" id="askScope">
-          <option value="">全部论文</option>
-        </select>
-      </div>
-      <div class="ask-body" id="askBody">
-        <div class="ask-msg bot">
-          <p>你可以这样问：</p>
-          <div class="chips">
-            <button class="chip">比表面积最高的样品是多少？</button>
-            <button class="chip">用了什么表面活性剂？</button>
-            <button class="chip">煅烧温度和时间是多少？</button>
+    <!-- ---------------- 自定义命名与备注 ---------------- -->
+    <div class="modal-mask" id="renameMask" hidden>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="renameTitle">
+        <div class="modal-head">
+          <div>
+            <strong id="renameTitle">重命名与备注</strong>
+            <span id="renameSub">只改显示名称，不会改动 PDF 原文件</span>
           </div>
-          <p class="muted">只依据已上传论文的原文作答，不会凭空编造。每条回答都附带页码引文，点击即可跳到原文。</p>
+          <button class="icon-btn" id="renameClose">×</button>
+        </div>
+
+        <div class="modal-body">
+          <label class="setting-row">
+            <span class="setting-label">显示名称</span>
+            <input class="input" id="renameInput" maxlength="200" placeholder="例如：SBA-15 大孔径体系（对照组）" />
+          </label>
+          <p class="setting-hint">留空则恢复为导入时的原始名称：<b id="renameOriginal">—</b></p>
+
+          <label class="setting-row">
+            <span class="setting-label">备注</span>
+            <textarea class="input note-input" id="noteInput" rows="4" maxlength="2000"
+              placeholder="记录这篇文献的用途、待确认的问题、和其他文献的关系…"></textarea>
+          </label>
+          <p class="setting-hint">备注会显示在文献卡片上，也会出现在悬停速览里。</p>
+        </div>
+
+        <div class="modal-foot">
+          <button class="btn" id="renameReset">恢复原名</button>
+          <span class="modal-foot-gap"></span>
+          <button class="btn" id="renameCancel">取消</button>
+          <button class="btn primary" id="renameSave">保存</button>
         </div>
       </div>
-      <form class="ask-form" id="askForm">
-        <input class="input" id="askInput" placeholder="围绕论文提问…" autocomplete="off" />
-        <button class="btn primary" type="submit">发送</button>
-      </form>
+    </div>
 
-      <!-- 折叠后的竖条：点任意位置重新展开 -->
-      <button class="ask-rail" id="askExpand" title="展开 AI 助手" aria-label="展开 AI 助手">
-        <span class="ask-rail-ico" aria-hidden="true">‹</span>
-        <span class="ask-rail-text">AI 助手</span>
-      </button>
-    </aside>
+    <!-- ---------------- 内容总结 ---------------- -->
+    <div class="modal-mask" id="summaryMask" hidden>
+      <div class="modal summary-modal" role="dialog" aria-modal="true" aria-labelledby="summaryTitle">
+        <div class="modal-head">
+          <div>
+            <strong id="summaryTitle">内容总结</strong>
+            <span id="summarySub">—</span>
+          </div>
+          <button class="icon-btn" id="summaryClose">×</button>
+        </div>
+
+        <div class="modal-body">
+          <div class="summary-brief" id="summaryBrief" hidden></div>
+          <div class="summary-text" id="summaryText"></div>
+        </div>
+
+        <div class="modal-foot">
+          <span class="modal-foot-gap"></span>
+          <button class="btn" id="summaryRefresh">重新生成</button>
+          <button class="btn primary" id="summaryDone">知道了</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 悬停速览：挂在 body 层，避免被卡片的 overflow 裁掉 -->
+    <div class="hover-brief" id="hoverBrief" hidden></div>
 
     <!-- ---------------- AI 服务设置 ---------------- -->
     <div class="modal-mask" id="settingsMask" hidden>

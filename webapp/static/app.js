@@ -133,6 +133,7 @@ $("themeToggle").addEventListener("click", () => {
 /* ------------------------------------------------------------------ */
 
 const VIEW_META = {
+  ask: ["AI 助手", "围绕已上传论文提问，回答附带页码引文，点击可跳到原文核对"],
   library: ["文献库", "上传论文、创建抽取任务、查看进度与记录数量"],
   review: ["提取结果", "左右联动：点击字段跳到证据原文，可直接修改并保存"],
   compare: ["样品对比", "跨论文勾选多条记录，生成条件矩阵并高亮差异项"],
@@ -148,6 +149,8 @@ function showView(name) {
   const [title, sub] = VIEW_META[name];
   $("viewTitle").textContent = title;
   $("viewSub").textContent = sub;
+  hideBrief();
+  if (name === "ask") $("askInput").focus();
   if (name === "jobs") loadJobs();
   if (name === "search") runSearch();
   if (name === "compare") loadCompare();
@@ -246,6 +249,80 @@ function syncBulkHint() {
 $("bulkMode").addEventListener("change", syncBulkHint);
 
 /* ------------------------------------------------------------------ */
+/* hover brief (简易版总结)                                            */
+/* ------------------------------------------------------------------ */
+
+/* 鼠标悬停在文献名字上即显示速览，不需要点击。
+   气泡挂在 body 下，避免被卡片的 overflow / 栅格裁切。 */
+
+let briefTimer = null;
+
+function briefHtml(paper) {
+  const brief = paper.summary_brief
+    || (paper.summary ? paper.summary.split("\n")[0] : "");
+  const rows = [
+    `<div class="hb-head">
+       <span class="hb-key">${esc(paper.paper_key)}</span>
+       <span class="hb-dims">${paper.pages} 页 · ${paper.n_records || 0} 条记录</span>
+     </div>`,
+    `<div class="hb-title">${esc(paper.title)}</div>`,
+  ];
+  if (paper.renamed) {
+    rows.push(`<div class="hb-origin">原名：${esc(paper.original_title)}</div>`);
+  }
+  rows.push(brief
+    ? `<div class="hb-brief">${esc(brief)}</div>`
+    : `<div class="hb-brief empty">还没有内容总结，点卡片上的「内容总结」生成。</div>`);
+  if (paper.note) {
+    rows.push(`<div class="hb-note"><b>备注</b>${esc(paper.note)}</div>`);
+  }
+  return rows.join("");
+}
+
+function placeBrief(anchor) {
+  const box = $("hoverBrief");
+  const rect = anchor.getBoundingClientRect();
+  const size = box.getBoundingClientRect();
+  const left = Math.max(8, Math.min(rect.left, window.innerWidth - size.width - 8));
+  let top = rect.bottom + 8;
+  if (top + size.height > window.innerHeight - 8) top = rect.top - size.height - 8;
+  box.style.left = `${left}px`;
+  box.style.top = `${Math.max(8, top)}px`;
+}
+
+function showBrief(anchor, paper) {
+  if (!paper) return;
+  const box = $("hoverBrief");
+  box.innerHTML = briefHtml(paper);
+  box.hidden = false;
+  placeBrief(anchor);
+}
+
+function hideBrief() {
+  clearTimeout(briefTimer);
+  $("hoverBrief").hidden = true;
+}
+
+/** 悬停 220ms 后再弹，避免扫过列表时气泡乱闪。 */
+function bindBriefHover(root) {
+  root.addEventListener("pointerover", (event) => {
+    const anchor = event.target.closest("[data-brief]");
+    if (!anchor || anchor.contains(event.relatedTarget)) return;
+    const paper = S.papers.find((p) => p.id === Number(anchor.dataset.brief));
+    clearTimeout(briefTimer);
+    briefTimer = setTimeout(() => showBrief(anchor, paper), 220);
+  });
+  root.addEventListener("pointerout", (event) => {
+    const anchor = event.target.closest("[data-brief]");
+    if (!anchor || anchor.contains(event.relatedTarget)) return;
+    hideBrief();
+  });
+}
+
+window.addEventListener("scroll", hideBrief, true);
+window.addEventListener("resize", hideBrief);
+
+/* ------------------------------------------------------------------ */
 /* library: grouped by extraction state                                */
 /* ------------------------------------------------------------------ */
 
@@ -313,21 +390,29 @@ function paperCardHtml(paper, group) {
         <label class="paper-pick">
           <input type="checkbox" data-pick="${paper.id}" ${picked ? "checked" : ""} />
           <span class="paper-key">${esc(paper.paper_key)}</span>
+          ${paper.renamed ? '<span class="paper-renamed" title="已自定义命名">已命名</span>' : ""}
         </label>
-        <h3 class="paper-title">${esc(paper.title)}</h3>
+        <!-- data-brief：鼠标悬停（不点击）即显示简易版总结 -->
+        <h3 class="paper-title" data-brief="${paper.id}">${esc(paper.title)}</h3>
       </div>
       ${statusBadge(job, paper)}
     </div>
+    ${paper.note ? `<div class="paper-note" title="${esc(paper.note)}">${esc(paper.note)}</div>` : ""}
     <div class="paper-dims">
       <span>${paper.pages} 页</span><span>${paper.n_tables} 表</span>
       <span>${(paper.chars / 1000).toFixed(1)}k 字符</span>
       ${paper.n_records ? `<span>${paper.n_reviewed}/${paper.n_records} 已复核</span>` : ""}
+      ${paper.summary ? '<span class="paper-has-summary">已有总结</span>' : ""}
     </div>
     ${group === "failed" && job ? `<div class="paper-err">${esc(job.message || "未知错误")}</div>` : ""}
     <div class="paper-actions">
       <select class="select sm" data-mode="${paper.id}" title="抽取方式"></select>
       <button class="btn sm" data-act="run">${group === "done" ? "重抽" : "抽取"}</button>
       <button class="btn sm" data-act="open" ${paper.n_records ? "" : "disabled"}>结果</button>
+    </div>
+    <div class="paper-actions second">
+      <button class="btn sm" data-act="summary" title="生成/查看这篇文献的内容总结">内容总结</button>
+      <button class="btn sm" data-act="rename" title="自定义显示名称并添加备注">命名/备注</button>
       <button class="btn sm danger" data-act="del">删除</button>
     </div>
   </div>`;
@@ -513,6 +598,16 @@ async function handleCardAction(event) {
     await openPaper(id);
   }
 
+  if (button.dataset.act === "summary") {
+    hideBrief();
+    await openSummary(id);
+  }
+
+  if (button.dataset.act === "rename") {
+    hideBrief();
+    openRename(id);
+  }
+
   if (button.dataset.act === "del") {
     const paper = S.papers.find((p) => p.id === id);
     if (!confirm(`删除「${paper ? paper.paper_key : id}」及其全部抽取记录？`)) return;
@@ -527,6 +622,147 @@ async function handleCardAction(event) {
 ["doneGrid", "pendingGrid", "failedGrid"].forEach((id) => {
   $(id).addEventListener("click", handleCardAction);
   $(id).addEventListener("change", handlePickChange);
+  bindBriefHover($(id));
+});
+
+/* ------------------------------------------------------------------ */
+/* 自定义命名与备注                                                     */
+/* ------------------------------------------------------------------ */
+
+let renameTarget = null;
+
+function openRename(paperFk) {
+  const paper = S.papers.find((p) => p.id === paperFk);
+  if (!paper) return;
+  renameTarget = paperFk;
+  $("renameSub").textContent = `${paper.paper_key} · 只改显示名称，不会改动 PDF 原文件`;
+  $("renameInput").value = paper.title || "";
+  $("renameOriginal").textContent = paper.original_title || paper.title || "—";
+  $("noteInput").value = paper.note || "";
+  $("renameMask").hidden = false;
+  $("renameInput").focus();
+  $("renameInput").select();
+}
+
+function closeRename() {
+  $("renameMask").hidden = true;
+  renameTarget = null;
+}
+
+async function patchPaper(paperFk, body) {
+  const updated = await api(`/api/papers/${paperFk}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  // 就地更新缓存，保证悬停速览立刻用上新名称/备注
+  const index = S.papers.findIndex((p) => p.id === paperFk);
+  if (index >= 0) S.papers[index] = { ...S.papers[index], ...updated };
+  return updated;
+}
+
+$("renameSave").addEventListener("click", () =>
+  withBusy($("renameSave"), "保存中…", async () => {
+    if (!renameTarget) return;
+    try {
+      const updated = await patchPaper(renameTarget, {
+        title: $("renameInput").value,
+        note: $("noteInput").value,
+      });
+      closeRename();
+      renderLibrary();
+      renderPaperSwitch();
+      renderAskScope();
+      if (S.paper && S.paper.id === updated.id) {
+        S.paper = { ...S.paper, ...updated };
+      }
+      toast(`已更新「${updated.title}」`);
+    } catch (error) { toast(error.message, "err"); }
+  }));
+
+$("renameReset").addEventListener("click", async () => {
+  if (!renameTarget) return;
+  try {
+    const updated = await patchPaper(renameTarget, { reset_title: true });
+    $("renameInput").value = updated.title;
+    renderLibrary();
+    renderPaperSwitch();
+    renderAskScope();
+    toast("已恢复导入时的原始名称");
+  } catch (error) { toast(error.message, "err"); }
+});
+
+$("renameCancel").addEventListener("click", closeRename);
+$("renameClose").addEventListener("click", closeRename);
+$("renameMask").addEventListener("click", (event) => {
+  if (event.target.id === "renameMask") closeRename();
+});
+
+/* ------------------------------------------------------------------ */
+/* 内容总结                                                             */
+/* ------------------------------------------------------------------ */
+
+let summaryTarget = null;
+
+function renderSummary(paper) {
+  $("summarySub").textContent = `${paper.paper_key} · ${paper.title}`;
+  const brief = $("summaryBrief");
+  brief.hidden = !paper.summary_brief;
+  brief.textContent = paper.summary_brief ? `速览：${paper.summary_brief}` : "";
+  $("summaryText").innerHTML = (paper.summary || "")
+    .split("\n")
+    .filter((line) => line.trim())
+    .map((line) => `<p>${esc(line)}</p>`)
+    .join("") || '<p class="placeholder">暂无总结内容。</p>';
+}
+
+/** 已有总结先直接展示，没有才去生成，避免每次点开都重算。 */
+async function openSummary(paperFk, refresh = false) {
+  const paper = S.papers.find((p) => p.id === paperFk);
+  if (!paper) return;
+  summaryTarget = paperFk;
+  $("summaryMask").hidden = false;
+
+  if (paper.summary && !refresh) {
+    renderSummary(paper);
+    return;
+  }
+
+  $("summarySub").textContent = `${paper.paper_key} · ${paper.title}`;
+  $("summaryBrief").hidden = true;
+  $("summaryText").innerHTML =
+    '<p class="placeholder">正在生成内容总结…（AI 模式下通常需要几十秒）</p>';
+
+  try {
+    const updated = await api(`/api/papers/${paperFk}/summary?refresh=true`, { method: "POST" });
+    const index = S.papers.findIndex((p) => p.id === paperFk);
+    if (index >= 0) S.papers[index] = { ...S.papers[index], ...updated };
+    renderSummary(updated);
+    renderLibrary();
+  } catch (error) {
+    $("summaryText").innerHTML = `<p class="placeholder">生成失败：${esc(error.message)}</p>`;
+  }
+}
+
+function closeSummary() {
+  $("summaryMask").hidden = true;
+  summaryTarget = null;
+}
+
+$("summaryRefresh").addEventListener("click", () =>
+  withBusy($("summaryRefresh"), "生成中…", async () => {
+    if (summaryTarget) await openSummary(summaryTarget, true);
+  }));
+$("summaryDone").addEventListener("click", closeSummary);
+$("summaryClose").addEventListener("click", closeSummary);
+$("summaryMask").addEventListener("click", (event) => {
+  if (event.target.id === "summaryMask") closeSummary();
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  if (!$("renameMask").hidden) closeRename();
+  else if (!$("summaryMask").hidden) closeSummary();
 });
 
 /** 显示已用时长；LLM 阶段额外提示耗时属正常。 */
@@ -987,7 +1223,7 @@ function renderPaperSwitch() {
   }
   box.innerHTML = usable.map((p) => `
     <button class="switch-card ${S.paper && S.paper.id === p.id ? "active" : ""}"
-            data-id="${p.id}" title="${esc(p.title)}">
+            data-id="${p.id}" data-brief="${p.id}">
       <span class="switch-top">
         <span class="switch-key">${esc(p.paper_key)}</span>
         <span class="switch-count">${p.n_reviewed}/${p.n_records}</span>
@@ -1049,11 +1285,14 @@ window.addEventListener("resize", () => {
 $("paperSwitch").addEventListener("click", async (event) => {
   const card = event.target.closest(".switch-card");
   if (!card) return;
+  hideBrief();
   const id = Number(card.dataset.id);
   if (S.paper && S.paper.id === id) return;
   if (S.dirty.size && !confirm("当前记录有未保存的修改，切换会丢失。继续？")) return;
   await openPaper(id);
 });
+
+bindBriefHover($("paperSwitch"));
 
 function renderAskScope() {
   const scope = $("askScope");
@@ -1617,36 +1856,7 @@ $("jobTable").addEventListener("click", async (event) => {
 /* ask panel                                                           */
 /* ------------------------------------------------------------------ */
 
-/* AI 助手常驻右侧第三栏，折叠状态记在本地，刷新后保持 */
-const ASK_KEY = "cheminfo-ask-collapsed";
-
-function setAskCollapsed(collapsed) {
-  document.querySelector(".app").classList.toggle("ask-collapsed", collapsed);
-  $("askCollapse").setAttribute("aria-expanded", String(!collapsed));
-  $("askToggle").setAttribute("aria-pressed", String(!collapsed));
-  $("askToggle").title = collapsed ? "展开 AI 助手" : "收起 AI 助手";
-  try { localStorage.setItem(ASK_KEY, collapsed ? "1" : "0"); } catch (_) { }
-}
-
-function askCollapsed() {
-  return document.querySelector(".app").classList.contains("ask-collapsed");
-}
-
-(function initAskPanel() {
-  let saved = null;
-  try { saved = localStorage.getItem(ASK_KEY); } catch (_) { }
-  // 窄屏首次访问默认收起，避免主工作区被挤扁
-  const narrow = window.matchMedia && window.matchMedia("(max-width: 860px)").matches;
-  setAskCollapsed(saved === null ? narrow : saved === "1");
-})();
-
-// 顶栏按钮、面板折叠按钮、折叠后的竖条共用同一套状态
-$("askToggle").addEventListener("click", () => setAskCollapsed(!askCollapsed()));
-$("askCollapse").addEventListener("click", () => setAskCollapsed(true));
-$("askExpand").addEventListener("click", () => {
-  setAskCollapsed(false);
-  $("askInput").focus();
-});
+/* AI 助手已独立为首页视图，范围选择与对话区都在 #view-ask 内 */
 
 $("askScope").addEventListener("change", (event) => {
   const option = event.target.selectedOptions[0];
@@ -1695,7 +1905,7 @@ $("askForm").addEventListener("submit", async (event) => {
         <b>${esc(c.paper_key)} · p.${c.page}</b><br/>${esc(c.quote)}
       </div>`).join("");
     pending.innerHTML = `
-      <p>${esc(result.answer).replace(/\n/g, "<br/>")}</p>
+      <p>${answerHtml(result.answer)}</p>
       ${citations ? `<div class="cite-list">${citations}</div>` : ""}
       <p class="muted">回答引擎：${esc(result.engine === "llm" ? "LLM + 检索" : "检索（抽取式）")} · 点击引文跳转原文</p>`;
   } catch (error) {
@@ -1709,16 +1919,25 @@ function paperFkOf(paperKey) {
   return paper ? paper.id : "";
 }
 
+/** 回答正文：先转义再把 **小节标题** 还原成粗体，保证内容总结一眼可见。 */
+function answerHtml(text) {
+  return esc(text)
+    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/\n/g, "<br/>");
+}
+
 /* ------------------------------------------------------------------ */
 
 (async function boot() {
   try {
     await loadStatus();
     await loadPapers();
+    // AI 助手是首页；提取结果视图仍预载一篇，切过去即有内容
     if (S.papers.length) {
       const withRecords = S.papers.find((p) => p.n_records > 0);
       if (withRecords) await openPaper(withRecords.id);
     }
+    showView("ask");
   } catch (error) {
     toast(`初始化失败：${error.message}`, "err");
   }
