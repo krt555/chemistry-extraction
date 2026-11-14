@@ -13,6 +13,7 @@ import csv
 import hashlib
 import io
 import json
+import queue
 import re
 import sqlite3
 import threading
@@ -40,6 +41,7 @@ from .auth import (
 )
 from .demo import DEMO_PAPERS
 from .pdfgen import render_demo_pdf
+from . import pagerender
 from .extraction import (
     EXTRACTION_MODES,
     FIELD_KEYS,
@@ -51,7 +53,13 @@ from .extraction import (
     run_extraction,
     verify_evidence,
 )
-from .qa import Retriever, build_answer
+from .qa import Retriever, build_answer, citations_of, stream_answer
+from .translate import (
+    TranslateError,
+    available_providers as translate_providers,
+    stream_translate,
+    translate as translate_text,
+)
 from .summarize import build_summary
 from .settings import (
     SettingsError,
@@ -75,6 +83,79 @@ db = Database(DATA_DIR / "mesoscope.db")
 
 app = FastAPI(title="MesoScope", version="1.0.0")
 _JOB_LOCK = threading.Lock()
+
+# 流式响应：关闭代理缓冲，否则 SSE 会被攒到最后一次性吐出
+_SSE_HEADERS = {
+    "Cache-Control": "no-cache",
+    "X-Accel-Buffering": "no",
+    "Connection": "keep-alive",
+}
+
+
+def _sse(event: str, payload: dict[str, Any]) -> str:
+    """Format one Server-Sent Event frame."""
+    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+# 预翻译：抽取完成后在后台把每页译好存进数据库。
+# 只用一个工作线程，既不会和抽取抢带宽，也不会堆积大量并发请求；
+# 译文写入 paper_pages.zh_text，不常驻内存，所以不会让进程越跑越大。
+_PREWARM_QUEUE: "queue.Queue[int]" = queue.Queue()
+_PREWARM_SEEN: set[int] = set()
+_PREWARM_LOCK = threading.Lock()
+_PREWARM_WORKER: threading.Thread | None = None
+
+
+def _prewarm_worker() -> None:
+    while True:
+        paper_fk = _PREWARM_QUEUE.get()
+        try:
+            _prewarm_paper(paper_fk)
+        except Exception:  # noqa: BLE001 - a failed page must not kill the worker
+            traceback.print_exc()
+        finally:
+            with _PREWARM_LOCK:
+                _PREWARM_SEEN.discard(paper_fk)
+            _PREWARM_QUEUE.task_done()
+
+
+def _prewarm_paper(paper_fk: int) -> None:
+    """Translate the pages of one paper that have no Chinese text yet."""
+    if not llm_status()["available"]:
+        return
+    pages = db.query(
+        "SELECT page, text FROM paper_pages"
+        " WHERE paper_fk = ? AND zh_text = '' ORDER BY page",
+        (paper_fk,),
+    )
+    for row in pages:
+        source = (row["text"] or "").strip()
+        if len(source) < 40:
+            continue
+        try:
+            result = translate_text(source)
+        except TranslateError:
+            # 配额/网络问题：留给用户手动触发，不反复重试刷爆接口
+            return
+        db.execute(
+            "UPDATE paper_pages SET zh_text = ?, zh_at = ? WHERE paper_fk = ? AND page = ?",
+            (result["text"], now(), paper_fk, row["page"]),
+        )
+
+
+def _schedule_prewarm(paper_fk: int) -> None:
+    """Queue background translation; silently ignores duplicates."""
+    global _PREWARM_WORKER
+    with _PREWARM_LOCK:
+        if paper_fk in _PREWARM_SEEN:
+            return
+        _PREWARM_SEEN.add(paper_fk)
+        if _PREWARM_WORKER is None or not _PREWARM_WORKER.is_alive():
+            _PREWARM_WORKER = threading.Thread(
+                target=_prewarm_worker, name="translate-prewarm", daemon=True
+            )
+            _PREWARM_WORKER.start()
+    _PREWARM_QUEUE.put(paper_fk)
 accounts = Accounts(db)
 
 
@@ -264,6 +345,7 @@ def _paper_payload(row: dict[str, Any]) -> dict[str, Any]:
         "n_tables": row["n_tables"],
         "source": row["source"],
         "created_at": row["created_at"],
+        "folder_fk": row.get("folder_fk"),
         "n_records": int(stats.get("n_records") or 0),
         "n_reviewed": int(stats.get("n_reviewed") or 0),
         "latest_job": _job_payload(job) if job else None,
@@ -305,12 +387,29 @@ def _record_payload(row: dict[str, Any], paper: dict[str, Any] | None = None) ->
     return payload
 
 
-def _store_pages(paper_fk: int, pages: list[str]) -> None:
+def _store_pages(
+    paper_fk: int,
+    pages: list[str],    tables: list[Any] | None = None,
+) -> None:
+    """Persist page text plus the structured tables found on each page.
+
+    Tables are kept as rows/columns (not the pipe-joined text that goes to the
+    LLM) so the review panel can render a real HTML table.
+    """
+    by_page: dict[int, list[dict[str, Any]]] = {}
+    for table in tables or []:
+        by_page.setdefault(table.page, []).append(
+            {"table_id": table.table_id, "rows": table.rows}
+        )
+
     with db.connect() as conn:
         conn.execute("DELETE FROM paper_pages WHERE paper_fk = ?", (paper_fk,))
         conn.executemany(
-            "INSERT INTO paper_pages (paper_fk, page, text) VALUES (?, ?, ?)",
-            [(paper_fk, index, text) for index, text in enumerate(pages, 1)],
+            "INSERT INTO paper_pages (paper_fk, page, text, tables_json) VALUES (?, ?, ?, ?)",
+            [
+                (paper_fk, index, text, dumps(by_page.get(index, [])))
+                for index, text in enumerate(pages, 1)
+            ],
         )
 
 
@@ -498,6 +597,130 @@ def api_papers(request: Request) -> dict[str, Any]:
     return {"papers": [_paper_payload(row) for row in rows]}
 
 
+# --------------------------------------------------------------------------- #
+# folders
+# --------------------------------------------------------------------------- #
+
+def _folder_row(folder_fk: int, user: dict[str, Any]) -> dict[str, Any]:
+    row = db.one(
+        "SELECT * FROM folders WHERE id = ? AND owner_fk = ?", (folder_fk, user["id"])
+    )
+    if not row:
+        raise HTTPException(404, "文件夹不存在，或不属于当前账号")
+    return row
+
+
+def _clean_folder_name(raw: Any) -> str:
+    name = re.sub(r"\s+", " ", str(raw or "")).strip()
+    if not name:
+        raise HTTPException(400, "文件夹名称不能为空")
+    if len(name) > 60:
+        raise HTTPException(400, "文件夹名称请控制在 60 个字符以内")
+    return name
+
+
+@app.get("/api/folders")
+def api_folders(request: Request) -> dict[str, Any]:
+    """Folders with how many papers each holds."""
+    user = current_user(request)
+    rows = db.query(
+        """
+        SELECT folders.*,
+               (SELECT COUNT(*) FROM papers WHERE papers.folder_fk = folders.id) AS n_papers
+        FROM folders WHERE owner_fk = ? ORDER BY name
+        """,
+        (user["id"],),
+    )
+    loose = db.one(
+        "SELECT COUNT(*) AS n FROM papers WHERE owner_fk = ? AND folder_fk IS NULL",
+        (user["id"],),
+    ) or {}
+    return {
+        "folders": [
+            {
+                "id": row["id"],
+                "name": row["name"],
+                "n_papers": int(row.get("n_papers") or 0),
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ],
+        "unfiled": int(loose.get("n") or 0),
+    }
+
+
+@app.post("/api/folders")
+async def api_create_folder(request: Request) -> dict[str, Any]:
+    user = current_user(request)
+    body = await request.json()
+    name = _clean_folder_name(body.get("name"))
+    try:
+        folder_fk = db.execute(
+            "INSERT INTO folders (owner_fk, name, created_at) VALUES (?, ?, ?)",
+            (user["id"], name, now()),
+        )
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(409, f"已存在同名文件夹：{name}") from exc
+    return {"id": folder_fk, "name": name, "n_papers": 0}
+
+
+@app.put("/api/folders/{folder_fk}")
+async def api_rename_folder(folder_fk: int, request: Request) -> dict[str, Any]:
+    user = current_user(request)
+    _folder_row(folder_fk, user)
+    body = await request.json()
+    name = _clean_folder_name(body.get("name"))
+    try:
+        db.execute("UPDATE folders SET name = ? WHERE id = ?", (name, folder_fk))
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(409, f"已存在同名文件夹：{name}") from exc
+    return {"id": folder_fk, "name": name}
+
+
+@app.delete("/api/folders/{folder_fk}")
+def api_delete_folder(folder_fk: int, request: Request) -> dict[str, Any]:
+    """Remove a folder; its papers go back to 未归档, they are never deleted."""
+    user = current_user(request)
+    _folder_row(folder_fk, user)
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE papers SET folder_fk = NULL WHERE folder_fk = ? AND owner_fk = ?",
+            (folder_fk, user["id"]),
+        )
+        conn.execute("DELETE FROM folders WHERE id = ?", (folder_fk,))
+    return {"ok": True}
+
+
+@app.post("/api/papers/move")
+async def api_move_papers(request: Request) -> dict[str, Any]:
+    """Move papers into a folder, or out of any folder when folder_fk is null."""
+    user = current_user(request)
+    body = await request.json()
+    ids = body.get("paper_fks") or []
+    if not isinstance(ids, list) or not ids:
+        raise HTTPException(400, "请先选择要归纳的论文")
+
+    raw_target = body.get("folder_fk")
+    target: int | None = None
+    if raw_target not in (None, "", 0, "0"):
+        target = int(raw_target)
+        _folder_row(target, user)
+
+    moved = 0
+    with db.connect() as conn:
+        for raw in ids:
+            try:
+                paper_fk = int(raw)
+            except (TypeError, ValueError):
+                continue
+            cursor = conn.execute(
+                "UPDATE papers SET folder_fk = ? WHERE id = ? AND owner_fk = ?",
+                (target, paper_fk, user["id"]),
+            )
+            moved += cursor.rowcount or 0
+    return {"moved": moved, "folder_fk": target}
+
+
 @app.get("/api/papers/{paper_fk}")
 def api_paper(paper_fk: int, request: Request) -> dict[str, Any]:
     user = current_user(request)
@@ -538,11 +761,149 @@ def api_paper_page(paper_fk: int, page: int, request: Request) -> dict[str, Any]
     user = current_user(request)
     _owned_paper_row(paper_fk, user)
     row = db.one(
-        "SELECT text FROM paper_pages WHERE paper_fk = ? AND page = ?", (paper_fk, page)
+        "SELECT text, tables_json FROM paper_pages WHERE paper_fk = ? AND page = ?",
+        (paper_fk, page),
     )
     if not row:
         raise HTTPException(404, "该页文本不存在")
-    return {"page": page, "text": row["text"]}
+    return {
+        "page": page,
+        "text": row["text"],
+        "tables": loads(row.get("tables_json"), []),
+    }
+
+
+@app.get("/api/papers/{paper_fk}/pages/{page}/image")
+def api_paper_page_image(
+    paper_fk: int,
+    page: int,
+    request: Request,
+    dpi: int = Query(pagerender.DEFAULT_DPI, ge=72, le=300),
+):
+    """Rasterised page, so the reviewer sees the real layout and figures."""
+    user = current_user(request)
+    row = _owned_paper_row(paper_fk, user)
+    try:
+        pdf_path = _materialize_pdf(row)
+        image = pagerender.render_page(pdf_path, page, dpi=dpi)
+    except (RuntimeError, pagerender.PageRenderError) as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return FileResponse(
+        image,
+        media_type="image/png",
+        # Cache key already encodes file mtime and dpi, so this is safe.
+        headers={"Cache-Control": "private, max-age=86400"},
+    )
+
+
+@app.get("/api/papers/{paper_fk}/pages/{page}/locate")
+def api_locate_quote(
+    paper_fk: int,
+    page: int,
+    request: Request,
+    quote: str = Query("", description="要在该页定位的引文"),
+) -> dict[str, Any]:
+    """Relative bounding boxes for one quote, used to draw the highlight."""
+    user = current_user(request)
+    row = _owned_paper_row(paper_fk, user)
+    if not quote.strip():
+        return {"found": False, "boxes": [], "mode": "empty"}
+    try:
+        pdf_path = _materialize_pdf(row)
+        result = pagerender.locate_quote(pdf_path, page, quote)
+        result["size"] = pagerender.page_size(pdf_path, page)
+    except (RuntimeError, pagerender.PageRenderError) as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return result
+
+
+# --------------------------------------------------------------------------- #
+# translation
+# --------------------------------------------------------------------------- #
+
+@app.get("/api/translate/providers")
+def api_translate_providers(request: Request) -> dict[str, Any]:
+    """Which translation backends are usable right now."""
+    current_user(request)
+    return {"providers": translate_providers()}
+
+
+@app.post("/api/translate")
+async def api_translate(request: Request) -> dict[str, Any]:
+    """Translate an arbitrary English snippet into Chinese."""
+    current_user(request)
+    body = await request.json()
+    try:
+        return translate_text(str(body.get("text") or ""), body.get("provider"))
+    except TranslateError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/papers/{paper_fk}/pages/{page}/translate")
+def api_translate_page(
+    paper_fk: int,
+    page: int,
+    request: Request,
+    provider: str = Query("", description="翻译服务：llm / mymemory / deepl"),
+) -> dict[str, Any]:
+    """Chinese translation of one page's text layer."""
+    user = current_user(request)
+    _owned_paper_row(paper_fk, user)
+    row = db.one(
+        "SELECT text, zh_text FROM paper_pages WHERE paper_fk = ? AND page = ?",
+        (paper_fk, page),
+    )
+    if not row:
+        raise HTTPException(404, "该页文本不存在")
+    # 抽取后后台已预翻译过的页面直接返回，无需再等模型
+    if (row.get("zh_text") or "").strip():
+        return {
+            "text": row["zh_text"],
+            "cached": True,
+            "truncated": False,
+            "provider": "prewarmed",
+            "page": page,
+        }
+    try:
+        result = translate_text(row["text"], provider or None)
+    except TranslateError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    result["page"] = page
+    return result
+
+
+@app.post("/api/papers/{paper_fk}/pages/{page}/translate-region")
+async def api_translate_region(
+    paper_fk: int, page: int, request: Request
+) -> dict[str, Any]:
+    """Translate only the text inside a user-drawn rectangle.
+
+    The body carries the selection as 0..1 fractions of the page
+    (``{"rect": {"x":, "y":, "w":, "h":}}``), matching what the front-end draws.
+    """
+    user = current_user(request)
+    row = _owned_paper_row(paper_fk, user)
+    body = await request.json()
+    rect = body.get("rect") or {}
+    if not isinstance(rect, dict):
+        raise HTTPException(400, "选区参数不合法")
+
+    try:
+        pdf_path = _materialize_pdf(row)
+        source = pagerender.text_in_rect(pdf_path, page, rect)
+    except (RuntimeError, pagerender.PageRenderError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    if not source.strip():
+        raise HTTPException(400, "选区内没有可识别的文字，请重新框选（图片区域无法翻译）")
+
+    try:
+        result = translate_text(source, body.get("provider"))
+    except TranslateError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    result["source"] = source
+    result["page"] = page
+    return result
 
 
 @app.post("/api/papers")
@@ -625,7 +986,7 @@ async def api_upload(
             now(),
         ),
     )
-    _store_pages(paper_fk, paper.pages_with_tables)
+    _store_pages(paper_fk, paper.pages_with_tables, paper.tables)
     return _paper_payload(_owned_paper_row(paper_fk, user))
 
 
@@ -725,7 +1086,7 @@ def _run_job(job_fk: int, paper_fk: int, mode: str) -> None:
         )
         path = _materialize_pdf(row)
         paper = load_paper(path)
-        _store_pages(paper_fk, paper.pages_with_tables)
+        _store_pages(paper_fk, paper.pages_with_tables, paper.tables)
 
         result = run_extraction(paper, mode=mode, progress=progress)
         records = result["records"]
@@ -794,6 +1155,8 @@ def _run_job(job_fk: int, paper_fk: int, mode: str) -> None:
                 job_fk,
             ),
         )
+        # 抽取已经交付，译文在后台慢慢补；用户点开「中文」时多半已经就绪。
+        _schedule_prewarm(paper_fk)
     except Exception as exc:  # noqa: BLE001 - job must record its own failure
         traceback.print_exc()
         db.execute(
@@ -1109,23 +1472,45 @@ def api_search(
     pore_min: float | None = None,
     pore_max: float | None = None,
     reviewed_only: bool = False,
+    paper_fk: int | None = Query(None, description="只搜某一篇论文"),
+    folder_fk: int | None = Query(None, description="只搜某个文件夹"),
+    unfiled: bool = Query(False, description="只搜未归档的论文"),
+    paper_q: str = Query("", description="按论文名称/文件名筛选"),
 ) -> dict[str, Any]:
     user = current_user(request)
-    rows = db.query(
-        """
-        SELECT records.*, papers.paper_key, papers.title, papers.paper_id AS paper_num
+    sql = """
+        SELECT records.*, papers.paper_key, papers.title, papers.paper_id AS paper_num,
+               papers.filename, papers.folder_fk
         FROM records JOIN papers ON papers.id = records.paper_fk
         WHERE papers.owner_fk = ?
-        ORDER BY papers.paper_id, records.record_index
-        """,
-        (user["id"],),
-    )
+    """
+    params: list[Any] = [user["id"]]
+    if paper_fk:
+        sql += " AND papers.id = ?"
+        params.append(paper_fk)
+    if folder_fk:
+        _folder_row(folder_fk, user)
+        sql += " AND papers.folder_fk = ?"
+        params.append(folder_fk)
+    elif unfiled:
+        sql += " AND papers.folder_fk IS NULL"
+    sql += " ORDER BY papers.paper_id, records.record_index"
+    rows = db.query(sql, tuple(params))
+
     needle = q.strip().lower()
+    paper_needle = paper_q.strip().lower()
     results = []
     for row in rows:
         fields = loads(row["fields_json"], {})
         if reviewed_only and not row["reviewed"]:
             continue
+        # 按文件搜索：论文显示名、原始文件名、paper_key 任一命中即可
+        if paper_needle:
+            haystack = " ".join(
+                str(row.get(key) or "") for key in ("title", "filename", "paper_key")
+            ).lower()
+            if paper_needle not in haystack:
+                continue
         if needle:
             if field and field in FIELD_KEYS:
                 haystack = str(fields.get(field) or "").lower()
@@ -1146,6 +1531,7 @@ def api_search(
         payload = _record_payload(row, {"paper_key": row["paper_key"], "title": row["title"], "paper_id": row["paper_num"]})
         payload["surface_area_num"] = area
         payload["pore_size_num"] = pore
+        payload["folder_fk"] = row.get("folder_fk")
         results.append(payload)
     return {"results": results, "total": len(results)}
 
@@ -1214,15 +1600,21 @@ def api_export(
 # QA
 # --------------------------------------------------------------------------- #
 
-def _build_retriever(paper_fk: int | None, user: dict[str, Any]) -> Retriever:
+def _build_retriever(
+    paper_fk: int | None,
+    user: dict[str, Any],
+    *,
+    folder_fk: int | None = None,
+    paper_fks: list[int] | None = None,
+) -> Retriever:
     """Pages available for question answering.
 
     Scope rules, deliberately asymmetric from the library view:
 
-    * no ``paper_fk`` — the **whole shared corpus**, every account's papers,
+    * no scope at all — the **whole shared corpus**, every account's papers,
       so the assistant benefits from everything the community uploaded;
-    * with ``paper_fk`` — that one paper, and only if the caller owns it,
-      because narrowing to a single paper is a library action.
+    * ``paper_fk`` / ``paper_fks`` / ``folder_fk`` — the caller's own papers
+      only, because narrowing the scope is a library action.
     """
     sql = """
         SELECT paper_pages.page, paper_pages.text, papers.paper_key, papers.title,
@@ -1230,11 +1622,57 @@ def _build_retriever(paper_fk: int | None, user: dict[str, Any]) -> Retriever:
         FROM paper_pages JOIN papers ON papers.id = paper_pages.paper_fk
     """
     params: tuple = ()
-    if paper_fk:
+    if paper_fks:
+        marks = ",".join("?" for _ in paper_fks)
+        sql += f" WHERE papers.id IN ({marks}) AND papers.owner_fk = ?"
+        params = (*paper_fks, user["id"])
+    elif folder_fk:
+        sql += " WHERE papers.folder_fk = ? AND papers.owner_fk = ?"
+        params = (folder_fk, user["id"])
+    elif paper_fk:
         sql += " WHERE papers.id = ? AND papers.owner_fk = ?"
         params = (paper_fk, user["id"])
     chunks = [row for row in db.query(sql, params) if (row["text"] or "").strip()]
     return Retriever(chunks)
+
+
+def _ask_scope(body: dict[str, Any], user: dict[str, Any]) -> dict[str, Any]:
+    """Resolve and validate the question's scope from the request body."""
+    paper_fk = body.get("paper_fk")
+    paper_fk = int(paper_fk) if paper_fk else None
+    if paper_fk:
+        _owned_paper_row(paper_fk, user)
+
+    folder_fk = body.get("folder_fk")
+    folder_fk = int(folder_fk) if folder_fk else None
+    if folder_fk:
+        _folder_row(folder_fk, user)
+
+    raw_list = body.get("paper_fks") or []
+    paper_fks: list[int] = []
+    if isinstance(raw_list, list):
+        for item in raw_list:
+            try:
+                candidate = int(item)
+            except (TypeError, ValueError):
+                continue
+            _owned_paper_row(candidate, user)
+            paper_fks.append(candidate)
+
+    if paper_fks:
+        label = "selected"
+    elif folder_fk:
+        label = "folder"
+    elif paper_fk:
+        label = "single"
+    else:
+        label = "shared"
+    return {
+        "paper_fk": paper_fk,
+        "folder_fk": folder_fk,
+        "paper_fks": paper_fks,
+        "label": label,
+    }
 
 
 @app.post("/api/ask")
@@ -1244,17 +1682,17 @@ async def api_ask(request: Request) -> dict[str, Any]:
     question = str(body.get("question") or "").strip()
     if not question:
         raise HTTPException(400, "问题不能为空")
-    paper_fk = body.get("paper_fk")
-    paper_fk = int(paper_fk) if paper_fk else None
-    if paper_fk:
-        _owned_paper_row(paper_fk, user)
     top_k = int(body.get("top_k") or 4)
 
-    retriever = _build_retriever(paper_fk, user)
+    scope = _ask_scope(body, user)
+    retriever = _build_retriever(
+        scope["paper_fk"], user,
+        folder_fk=scope["folder_fk"], paper_fks=scope["paper_fks"],
+    )
     hits = retriever.search(question, top_k=max(1, min(8, top_k)))
     result = build_answer(question, hits, llm_status()["available"])
     result["question"] = question
-    result["scope"] = "single" if paper_fk else "shared"
+    result["scope"] = scope["label"]
     # 标出哪些引文来自别人上传的论文：文献库里看不到它们，
     # 但问答会用到，必须让用户知道来源不在自己库中。
     own = {
@@ -1268,6 +1706,111 @@ async def api_ask(request: Request) -> dict[str, Any]:
         citation["shared"] = bool(match and match["id"] not in own)
     result["corpus_papers"] = len({chunk["paper_fk"] for chunk in retriever.chunks})
     return result
+
+
+@app.post("/api/ask/stream")
+async def api_ask_stream(request: Request):
+    """Same as /api/ask, but streams the answer token by token (SSE)."""
+    user = current_user(request)
+    body = await request.json()
+    question = str(body.get("question") or "").strip()
+    if not question:
+        raise HTTPException(400, "问题不能为空")
+    top_k = int(body.get("top_k") or 4)
+
+    scope = _ask_scope(body, user)
+    retriever = _build_retriever(
+        scope["paper_fk"], user,
+        folder_fk=scope["folder_fk"], paper_fks=scope["paper_fks"],
+    )
+    hits = retriever.search(question, top_k=max(1, min(8, top_k)))
+
+    own = {
+        row["id"]
+        for row in db.query("SELECT id FROM papers WHERE owner_fk = ?", (user["id"],))
+    }
+    citations = citations_of(hits)
+    for citation in citations:
+        match = db.one(
+            "SELECT id FROM papers WHERE paper_key = ?", (citation.get("paper_key"),)
+        )
+        citation["shared"] = bool(match and match["id"] not in own)
+
+    def events():
+        # 先把引文发给前端：检索已经完成，用户可以立刻看到来源
+        yield _sse("meta", {
+            "citations": citations,
+            "scope": scope["label"],
+            "corpus_papers": len({chunk["paper_fk"] for chunk in retriever.chunks}),
+        })
+        if not hits:
+            yield _sse("delta", {"text": "检索到的页面中没有相关信息。可以换个说法，或先确认该论文已完成抽取。"})
+            yield _sse("done", {"engine": "retrieval"})
+            return
+
+        if llm_status()["available"]:
+            try:
+                for piece in stream_answer(question, hits):
+                    yield _sse("delta", {"text": piece})
+                yield _sse("done", {"engine": "llm"})
+                return
+            except Exception as exc:  # 退回抽取式，不让对话中断
+                yield _sse("notice", {"text": f"AI 回答失败，已改用检索式：{exc}"})
+
+        fallback = build_answer(question, hits, False)
+        yield _sse("delta", {"text": fallback["answer"]})
+        yield _sse("done", {"engine": "retrieval"})
+
+    return StreamingResponse(events(), media_type="text/event-stream", headers=_SSE_HEADERS)
+
+
+@app.post("/api/translate/stream")
+async def api_translate_stream(request: Request):
+    """Stream a translation so long passages appear as they arrive."""
+    current_user(request)
+    body = await request.json()
+    text = str(body.get("text") or "")
+    provider = body.get("provider")
+
+    def events():
+        try:
+            for piece in stream_translate(text, provider):
+                yield _sse("delta", {"text": piece})
+            yield _sse("done", {})
+        except TranslateError as exc:
+            yield _sse("error", {"message": str(exc)})
+
+    return StreamingResponse(events(), media_type="text/event-stream", headers=_SSE_HEADERS)
+
+
+@app.post("/api/papers/{paper_fk}/pages/{page}/translate/stream")
+async def api_translate_page_stream(paper_fk: int, page: int, request: Request):
+    """Stream one page's translation."""
+    user = current_user(request)
+    _owned_paper_row(paper_fk, user)
+    row = db.one(
+        "SELECT text, zh_text FROM paper_pages WHERE paper_fk = ? AND page = ?",
+        (paper_fk, page),
+    )
+    if not row:
+        raise HTTPException(404, "该页文本不存在")
+    body = await request.json() if await request.body() else {}
+    provider = (body or {}).get("provider")
+    ready = (row.get("zh_text") or "").strip()
+
+    def events():
+        if ready:
+            yield _sse("delta", {"text": ready})
+            yield _sse("done", {"cached": True})
+            return
+        try:
+            for piece in stream_translate(row["text"], provider):
+                yield _sse("delta", {"text": piece})
+            yield _sse("done", {})
+        except TranslateError as exc:
+            yield _sse("error", {"message": str(exc)})
+
+    return StreamingResponse(events(), media_type="text/event-stream", headers=_SSE_HEADERS)
 
 
 # --------------------------------------------------------------------------- #
@@ -1322,7 +1865,7 @@ def api_seed(request: Request, run: bool = True) -> dict[str, Any]:
                 now(),
             ),
         )
-        _store_pages(paper_fk, paper.pages_with_tables)
+        _store_pages(paper_fk, paper.pages_with_tables, paper.tables)
         created.append({"paper_fk": paper_fk, "paper_key": paper_key})
 
         if run:

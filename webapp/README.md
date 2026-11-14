@@ -19,6 +19,8 @@ python webapp/run.py
 # 或（推荐）
 .venv\Scripts\python.exe webapp\run.py
 
+.venv\Scripts\python.exe webapp\run.py --host 0.0.0.0 --port 8010
+
 # 自定义端口 / 开发热重载
 python webapp/run.py --port 8800 --reload
 ```

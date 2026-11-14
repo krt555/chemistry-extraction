@@ -210,6 +210,73 @@ class OpenAICompatibleLLM:
             raise LLMError(f"endpoint responded, but not with JSON: {response.text[:300]}")
         return response
 
+    def stream(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+    ):
+        """Yield text deltas from a streaming chat completion.
+
+        Falls back to one blocking request when the endpoint does not support
+        SSE, so callers always get their text either way.
+        """
+        payload: dict[str, Any] = {
+            "model": self.config.model,
+            "messages": messages,
+            "temperature": self.config.temperature if temperature is None else temperature,
+            "max_tokens": max_tokens or self.config.max_tokens,
+            "stream": True,
+        }
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        request = urllib.request.Request(
+            f"{self.config.base_url}/chat/completions",
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.config.api_key}",
+                "User-Agent": self.config.user_agent,
+                "x-opencode-session": self.config.session_id,
+                "Accept": "text/event-stream",
+            },
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(request, timeout=self.config.timeout_s) as response:
+                for raw in response:
+                    line = raw.decode("utf-8", "replace").strip()
+                    if not line or not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        return
+                    try:
+                        chunk = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    for choice in chunk.get("choices") or []:
+                        piece = (choice.get("delta") or {}).get("content")
+                        if piece:
+                            yield piece
+            return
+        except urllib.error.HTTPError as exc:
+            detail = _read_error(exc)
+            if exc.code in {401, 403}:
+                raise LLMError(
+                    f"LLM authentication failed (HTTP {exc.code}): {detail}"
+                ) from exc
+            # Endpoint refused streaming; fall through to the blocking call.
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise LLMError(f"network error: {exc}") from exc
+
+        response = self.complete(
+            messages, json_mode=False, max_tokens=max_tokens, temperature=temperature
+        )
+        if response.text:
+            yield response.text
+
     def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(

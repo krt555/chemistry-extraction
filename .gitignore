@@ -18,6 +18,7 @@ papers/*.pdf
 !papers/README.md
 outputs/
 data/cache/
+.box-agent-scratch/
 
 # MesoScope web app runtime state (database + uploaded PDFs)
 webapp/data/

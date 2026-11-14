@@ -194,8 +194,22 @@
               <select class="select" id="askScope">
                 <option value="">全部论文（共享语料）</option>
               </select>
+              <button class="btn sm" id="askPickBtn"
+                      title="勾选多篇论文，只用它们回答">勾选多篇…</button>
             </div>
             <span class="ask-scope-note" id="askScopeLabel">全部论文（共享语料）</span>
+          </div>
+
+          <!-- 多选面板：按文件夹分组列出自己的论文 -->
+          <div class="ask-pick" id="askPick" hidden>
+            <div class="ask-pick-head">
+              <span>选择要参考的论文</span>
+              <div>
+                <button class="btn sm" id="askPickClear">清空</button>
+                <button class="btn sm primary" id="askPickDone">确定</button>
+              </div>
+            </div>
+            <div class="ask-pick-list" id="askPickList"></div>
           </div>
           <div class="ask-body" id="askBody">
             <div class="ask-msg bot">
@@ -232,6 +246,12 @@
           <span>解析后即可创建抽取任务；支持多选上传</span>
         </div>
 
+        <!-- 文件夹：按研究主题归纳论文，点击可筛选 -->
+        <div class="folder-bar" id="folderBar">
+          <div class="folder-chips" id="folderChips"></div>
+          <button class="btn sm" id="folderNew" title="新建一个文件夹用于归纳论文">＋ 新建文件夹</button>
+        </div>
+
         <!-- 批量操作栏：面对大量文件时避免逐个点击 -->
         <div class="bulk-bar" id="bulkBar" hidden>
           <label class="check">
@@ -243,6 +263,10 @@
           <select class="select" id="bulkMode" title="批量抽取方式"></select>
           <button class="btn primary" id="bulkRun" disabled>一键抽取</button>
           <button class="btn" id="bulkRunPending" title="只抽取尚未抽取的论文">抽取全部待抽取</button>
+          <span class="bulk-sep"></span>
+          <span class="bulk-label">归纳到</span>
+          <select class="select" id="bulkFolder" title="把选中的论文移动到文件夹"></select>
+          <button class="btn" id="bulkMove" disabled>移动</button>
           <button class="btn danger" id="bulkDelete" disabled>一键删除</button>
         </div>
         <div class="help-tip bulk-hint" id="bulkHint" hidden>
@@ -261,15 +285,7 @@
           <div class="running-list" id="runningList"></div>
         </section>
 
-        <section class="lib-group" id="groupDone" hidden>
-          <div class="group-head">
-            <span class="group-dot ok"></span>
-            <h2>已完成 <em id="doneCount">0</em></h2>
-            <span class="group-note">点击“提取结果”查看字段与原文定位</span>
-          </div>
-          <div class="paper-grid" id="doneGrid"></div>
-        </section>
-
+        <!-- 待抽取排在前面：这是用户最需要动手处理的一组 -->
         <section class="lib-group" id="groupPending" hidden>
           <div class="group-head">
             <span class="group-dot idle"></span>
@@ -277,6 +293,15 @@
             <span class="group-note">已解析入库，尚未运行抽取任务</span>
           </div>
           <div class="paper-grid" id="pendingGrid"></div>
+        </section>
+
+        <section class="lib-group" id="groupDone" hidden>
+          <div class="group-head">
+            <span class="group-dot ok"></span>
+            <h2>已完成 <em id="doneCount">0</em></h2>
+            <span class="group-note">点击“提取结果”查看字段与原文定位</span>
+          </div>
+          <div class="paper-grid" id="doneGrid"></div>
         </section>
 
         <section class="lib-group" id="groupFailed" hidden>
@@ -313,19 +338,82 @@
             <div class="panel-head">
               <span>原文定位</span>
               <div class="page-nav">
-                <button class="icon-btn" id="pagePrev">‹</button>
+                <!-- 原版 = PDF 实际版面（含图表）；文本 = 可复制的纯文字 -->
+                <div class="view-toggle" id="pageViewToggle" role="group" aria-label="原文显示方式">
+                  <button class="view-toggle-btn active" data-pageview="image"
+                          title="显示 PDF 原始版面，图表、公式、分栏都和原文一致">原版</button>
+                  <button class="view-toggle-btn" data-pageview="text"
+                          title="显示纯文字，便于复制数值和逐字核对">文本</button>
+                  <button class="view-toggle-btn" data-pageview="zh"
+                          title="把本页英文正文翻译成中文">中文</button>
+                </div>
+                <!-- 次要工具收进「更多」，避免挤占翻页按钮的位置 -->
+                <div class="tool-menu" id="toolMenu">
+                  <button class="icon-btn" id="toolMenuBtn" title="更多工具"
+                          aria-haspopup="true" aria-expanded="false">⋯</button>
+                  <div class="tool-popover" id="toolPopover" hidden>
+                    <button class="tool-item" id="regionMode"
+                            title="开启后在页面上拖出一个区域，只翻译该区域">▭ 框选翻译</button>
+                    <div class="tool-row">
+                      <span>缩放</span>
+                      <button class="icon-btn" id="zoomOut" title="缩小">－</button>
+                      <span id="zoomLabel">100%</span>
+                      <button class="icon-btn" id="zoomIn" title="放大">＋</button>
+                    </div>
+                    <div class="tool-row">
+                      <span>翻译服务</span>
+                      <select class="select tiny-select" id="translateProvider"
+                              title="选择翻译服务；没有 AI 密钥时可用免费的 MyMemory"></select>
+                    </div>
+                  </div>
+                </div>
+                <button class="icon-btn" id="pagePrev" title="上一页">‹</button>
                 <span id="pageLabel">— / —</span>
-                <button class="icon-btn" id="pageNext">›</button>
+                <button class="icon-btn" id="pageNext" title="下一页">›</button>
               </div>
             </div>
             <div class="evidence-box" id="evidenceBox" hidden>
-              <div class="evidence-label">当前字段证据</div>
+              <div class="evidence-head">
+                <div class="evidence-label">当前字段证据</div>
+                <button class="btn sm" id="evidenceTranslate" title="把这句英文翻译成中文">译</button>
+              </div>
               <p id="evidenceQuote"></p>
+              <p class="evidence-zh" id="evidenceZh" hidden></p>
+              <p class="evidence-miss" id="evidenceMiss" hidden></p>
             </div>
-            <div class="page-text" id="pageText">
+
+            <!-- 原版视图：页面图片 + 按坐标叠加的高亮框 -->
+            <div class="page-image-wrap" id="pageImageWrap">
+              <div class="placeholder" id="pageImageHint">在右侧点击任意字段，这里会跳转到证据所在页并框出原句。</div>
+              <div class="page-canvas" id="pageCanvas" hidden>
+                <img id="pageImage" alt="论文页面" />
+                <div class="page-marks" id="pageMarks"></div>
+                <div class="region-box" id="regionBox" hidden></div>
+              </div>
+            </div>
+
+            <!-- 框选翻译结果 -->
+            <div class="region-result" id="regionResult" hidden>
+              <div class="region-head">
+                <span>框选翻译</span>
+                <button class="icon-btn" id="regionClose">×</button>
+              </div>
+              <div class="region-body" id="regionBody"></div>
+            </div>
+
+            <!-- 文本视图：纯文字 + 结构化表格 -->
+            <div class="page-text" id="pageText" hidden>
               <div class="placeholder">在右侧点击任意字段，这里会跳转到证据所在页并高亮引文。</div>
             </div>
+
+            <!-- 中文视图：整页译文 -->
+            <div class="page-text page-zh" id="pageZh" hidden>
+              <div class="placeholder">点击上方「中文」可把本页正文翻译成中文。</div>
+            </div>
           </div>
+          <!-- 拖动调整左右占比 -->
+          <div class="workbench-split" id="workbenchSplit" role="separator"
+               aria-orientation="vertical" tabindex="0" title="拖动调整左右宽度；双击复位"></div>
           <div class="panel field-panel">
             <div class="panel-head">
               <span>抽取记录</span>
@@ -404,6 +492,9 @@
       <section class="view" id="view-search">
         <div class="filter-bar">
           <input class="input grow" id="searchQ" placeholder="字段值关键词，例如 P123、cubic、TEOS" />
+          <input class="input" id="searchPaperQ" placeholder="按文件名/论文名筛选"
+                 title="只在名称匹配的论文里检索，支持文件名和自定义名称" />
+          <select class="select" id="searchFolder" title="限定在某个文件夹内检索"></select>
           <select class="select" id="searchField" title="默认在全部字段里找；选定某个字段可缩小范围">
             <option value="">全部字段</option>
           </select>

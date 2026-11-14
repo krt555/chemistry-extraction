@@ -171,11 +171,19 @@ def best_snippet(text: str, query: list[str], width: int = 300) -> str:
 
 
 ANSWER_SYSTEM = (
-    "你是材料化学文献助手。只能依据给定的页面片段回答，不得补充片段之外的事实。"
-    "全程用中文作答，英文术语、化学式与数值保留原样即可。"
-    "回答必须分两段：第一段以「**内容总结**：」开头，用 1-3 句中文概括检索到的片段讲了什么；"
-    "第二段以「**详细回答**：」开头，给出针对问题的具体结论，每个结论句末标注来源，格式为 [p.页码]。"
-    "若片段不足以回答，直接说明“检索到的页面中没有相关信息”。"
+    "你是材料化学文献助手，任务是**回答用户的问题**，不是复述或翻译原文。"
+    "只能依据给定的页面内容作答，不得补充其中没有的事实。"
+    "全程用中文回答：英文原文必须翻译成中文表述，化学式、试剂缩写（如 TEOS、P123、CTAB）"
+    "、空间群（如 p6mm、Im3m）和数值单位保留原样。"
+    "\n回答格式必须是两段："
+    "\n第一段以「**直接回答**：」开头，用 1-3 句中文**正面回答用户的问题**，"
+    "直接给出结论、数值或条件；不要罗列原文，也不要说“文中提到”。"
+    "\n第二段以「**依据**：」开头，分条列出支撑该结论的具体内容。"
+    "每条必须写明来自哪一篇论文：格式为「论文编号《标题》第 N 页：中文说明 [p.N]」。"
+    "若需要引用英文原句，请在中文说明之后用括号附上，不要只给英文。"
+    "\n如果多篇论文都提到该问题，请分别说明各篇的做法或数值差异。"
+    "\n若页面内容确实无法回答该问题，第一段直接说明“检索到的页面中没有相关信息”，"
+    "并说明可以换什么说法再问。"
 )
 
 
@@ -225,7 +233,48 @@ def build_answer(question: str, hits: list[dict[str, Any]], llm_available: bool)
             "engine": "retrieval",
         }
 
-    citations = [
+def build_context_blocks(hits: list[dict[str, Any]], budget: int = 24000) -> str:
+    """Render retrieved pages for the prompt, newest-relevant first.
+
+    Each block names the paper explicitly so the model can tell the user which
+    article an answer came from.
+    """
+    blocks: list[str] = []
+    for index, hit in enumerate(hits, 1):
+        full = " ".join(str(hit.get("text") or hit["snippet"]).split())
+        if len(full) > 6000:
+            full = full[:6000] + "…"
+        block = (
+            f"[来源 {index}] 论文编号 {hit['paper_key']}"
+            f"｜标题《{hit.get('title') or '未命名'}》｜第 {hit['page']} 页\n"
+            f"检索命中片段：{hit['snippet']}\n"
+            f"该页完整内容：{full}"
+        )
+        if blocks and budget - len(block) < 0:
+            break
+        budget -= len(block)
+        blocks.append(block)
+    return "\n\n".join(blocks)
+
+
+def build_question_prompt(question: str, hits: list[dict[str, Any]]) -> list[dict[str, str]]:
+    context = build_context_blocks(hits)
+    return [
+        {"role": "system", "content": ANSWER_SYSTEM},
+        {
+            "role": "user",
+            "content": (
+                f"用户的问题：{question}\n\n"
+                f"可用的论文页面内容：\n{context}\n\n"
+                "请依据以上内容，用中文正面回答这个问题，"
+                "并说明结论来自哪一篇论文（写出论文编号和标题）。"
+            ),
+        },
+    ]
+
+
+def citations_of(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
         {
             "paper_key": hit["paper_key"],
             "title": hit.get("title", ""),
@@ -236,26 +285,36 @@ def build_answer(question: str, hits: list[dict[str, Any]], llm_available: bool)
         for hit in hits
     ]
 
+
+def stream_answer(question: str, hits: list[dict[str, Any]]):
+    """Yield the answer incrementally; raises when no LLM is configured."""
+    from mkea_extract.config import LLMConfig
+    from mkea_extract.llm import OpenAICompatibleLLM
+
+    llm = OpenAICompatibleLLM(LLMConfig.from_env())
+    yield from llm.stream(build_question_prompt(question, hits), max_tokens=1200)
+
+
+def build_answer(question: str, hits: list[dict[str, Any]], llm_available: bool) -> dict[str, Any]:
+    if not hits:
+        return {
+            "answer": "检索到的页面中没有相关信息。可以换个说法，或先确认该论文已完成抽取。",
+            "citations": [],
+            "engine": "retrieval",
+        }
+
+    citations = citations_of(hits)
+
     if llm_available:
         try:
             from mkea_extract.config import LLMConfig
             from mkea_extract.llm import OpenAICompatibleLLM
 
-            context = "\n\n".join(
-                f"[片段 {i}] 论文 {hit['paper_key']} 第 {hit['page']} 页：\n{hit['snippet']}"
-                for i, hit in enumerate(hits, 1)
-            )
             llm = OpenAICompatibleLLM(LLMConfig.from_env())
             response = llm.complete(
-                [
-                    {"role": "system", "content": ANSWER_SYSTEM},
-                    {
-                        "role": "user",
-                        "content": f"问题：{question}\n\n可用片段：\n{context}\n\n请作答。",
-                    },
-                ],
+                build_question_prompt(question, hits),
                 json_mode=False,
-                max_tokens=900,
+                max_tokens=1200,
             )
             text = response.text.strip()
             if text:

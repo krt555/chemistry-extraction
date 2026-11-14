@@ -58,10 +58,20 @@ CREATE TABLE IF NOT EXISTS papers (
 );
 
 CREATE TABLE IF NOT EXISTS paper_pages (
-    paper_fk  INTEGER NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
-    page      INTEGER NOT NULL,
-    text      TEXT NOT NULL DEFAULT '',
+    paper_fk    INTEGER NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
+    page        INTEGER NOT NULL,
+    text        TEXT NOT NULL DEFAULT '',
+    tables_json TEXT NOT NULL DEFAULT '[]',
+    zh_text     TEXT NOT NULL DEFAULT '',
+    zh_at       TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (paper_fk, page)
+);
+
+CREATE TABLE IF NOT EXISTS folders (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_fk   INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    name       TEXT NOT NULL,
+    created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS jobs (
@@ -124,12 +134,21 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     # 账号体系：论文归属到用户；PDF 正文二进制入库，便于跨设备共享
     ("papers", "owner_fk", "ALTER TABLE papers ADD COLUMN owner_fk INTEGER REFERENCES users(id)"),
     ("papers", "pdf_blob", "ALTER TABLE papers ADD COLUMN pdf_blob BLOB"),
+    # 证据面板：表格以结构化行列存储，供前端渲染成真正的 HTML 表格
+    ("paper_pages", "tables_json", "ALTER TABLE paper_pages ADD COLUMN tables_json TEXT NOT NULL DEFAULT '[]'"),
+    # 文件夹归纳：未归档的论文 folder_fk 为 NULL
+    ("papers", "folder_fk", "ALTER TABLE papers ADD COLUMN folder_fk INTEGER REFERENCES folders(id)"),
+    # 抽取完成后后台预翻译，结果落库，点开即显示
+    ("paper_pages", "zh_text", "ALTER TABLE paper_pages ADD COLUMN zh_text TEXT NOT NULL DEFAULT ''"),
+    ("paper_pages", "zh_at", "ALTER TABLE paper_pages ADD COLUMN zh_at TEXT NOT NULL DEFAULT ''"),
 )
 
 POST_MIGRATION_SQL = (
     "CREATE INDEX IF NOT EXISTS idx_papers_hash ON papers(content_hash)",
     "CREATE INDEX IF NOT EXISTS idx_papers_owner ON papers(owner_fk)",
     "CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_fk)",
+    "CREATE INDEX IF NOT EXISTS idx_papers_folder ON papers(folder_fk)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_folders_owner_name ON folders(owner_fk, name)",
 )
 
 _LOCK = threading.Lock()
