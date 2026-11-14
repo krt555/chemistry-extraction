@@ -14,10 +14,31 @@ from pathlib import Path
 from typing import Any, Iterator
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS users (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    username      TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    display_name  TEXT NOT NULL DEFAULT '',
+    email         TEXT NOT NULL DEFAULT '',
+    institution   TEXT NOT NULL DEFAULT '',
+    research_area TEXT NOT NULL DEFAULT '',
+    bio           TEXT NOT NULL DEFAULT '',
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    token      TEXT PRIMARY KEY,
+    user_fk    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS papers (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     paper_key     TEXT NOT NULL UNIQUE,
     paper_id      INTEGER NOT NULL,
+    owner_fk      INTEGER REFERENCES users(id) ON DELETE CASCADE,
     title         TEXT NOT NULL DEFAULT '',
     original_title TEXT NOT NULL DEFAULT '',
     note          TEXT NOT NULL DEFAULT '',
@@ -27,6 +48,7 @@ CREATE TABLE IF NOT EXISTS papers (
     summary_at    TEXT NOT NULL DEFAULT '',
     filename      TEXT NOT NULL DEFAULT '',
     pdf_path      TEXT NOT NULL DEFAULT '',
+    pdf_blob      BLOB,
     pages         INTEGER NOT NULL DEFAULT 0,
     chars         INTEGER NOT NULL DEFAULT 0,
     n_tables      INTEGER NOT NULL DEFAULT 0,
@@ -99,10 +121,15 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("papers", "summary_brief", "ALTER TABLE papers ADD COLUMN summary_brief TEXT NOT NULL DEFAULT ''"),
     ("papers", "summary_engine", "ALTER TABLE papers ADD COLUMN summary_engine TEXT NOT NULL DEFAULT ''"),
     ("papers", "summary_at", "ALTER TABLE papers ADD COLUMN summary_at TEXT NOT NULL DEFAULT ''"),
+    # 账号体系：论文归属到用户；PDF 正文二进制入库，便于跨设备共享
+    ("papers", "owner_fk", "ALTER TABLE papers ADD COLUMN owner_fk INTEGER REFERENCES users(id)"),
+    ("papers", "pdf_blob", "ALTER TABLE papers ADD COLUMN pdf_blob BLOB"),
 )
 
 POST_MIGRATION_SQL = (
     "CREATE INDEX IF NOT EXISTS idx_papers_hash ON papers(content_hash)",
+    "CREATE INDEX IF NOT EXISTS idx_papers_owner ON papers(owner_fk)",
+    "CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_fk)",
 )
 
 _LOCK = threading.Lock()

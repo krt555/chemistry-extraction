@@ -52,3 +52,37 @@ class ConfigTests(TestCase):
     def test_redacted(self):
         config = LLMConfig(api_key="secret")
         self.assertEqual(config.redacted()["api_key"], "***")
+
+
+class MaxTokensTests(TestCase):
+    """Guard the HTTP 400 "Range of max_tokens should be [1, 32768]" trap.
+
+    Providers such as qwen-plus reject anything above 32768, and the whole
+    extraction then degrades to the rule engine.
+    """
+
+    def test_default_is_within_common_provider_limits(self):
+        self.assertLessEqual(LLMConfig(api_key="k").max_tokens, 32768)
+
+    def test_env_default_also_stays_within_limits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            absent = Path(tmp) / "none.env"
+            with patch.dict(
+                os.environ,
+                {"MKEA_LLM_API_KEY": "k", "MKEA_ENV_FILE": str(absent)},
+                clear=True,
+            ):
+                self.assertLessEqual(LLMConfig.from_env().max_tokens, 32768)
+
+    def test_shipped_env_example_does_not_exceed_the_limit(self):
+        """A fresh clone must not start out broken."""
+        root = Path(__file__).resolve().parents[1]
+        for name in (".env.example", ".env"):
+            path = root / name
+            if not path.exists():
+                continue
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line.startswith("MKEA_LLM_MAX_TOKENS="):
+                    value = int(line.split("=", 1)[1])
+                    self.assertLessEqual(value, 32768, f"{name} 配置超出常见服务商上限")

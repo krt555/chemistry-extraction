@@ -176,7 +176,8 @@ def extract_paper_agent(
 
     for step in range(1, max_steps + 1):
         try:
-            parsed, response = llm.complete_json(messages, max_tokens=32768)
+            # 不写死上限：跟随 LLMConfig，换服务商时由配置和自动降档决定
+            parsed, response = llm.complete_json(messages)
         except LLMError as exc:
             raise AgentError(f"agent LLM failed: {exc}") from exc
         model = response.model

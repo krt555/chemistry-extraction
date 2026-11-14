@@ -8,14 +8,23 @@ from __future__ import annotations
 
 import re
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 for extra in (ROOT, ROOT / "src"):
     if str(extra) not in sys.path:
         sys.path.insert(0, str(extra))
 
+from webapp.app.auth import (
+    Accounts,
+    AuthError,
+    hash_password,
+    verify_password,
+)
+from webapp.app.db import Database, now
 from webapp.app.demo import DEMO_PAPERS
 from webapp.app.heuristic import extract_records_heuristic
 from webapp.app.qa import Retriever, best_snippet, build_answer, expand_query
@@ -183,7 +192,19 @@ class ExportContractTest(unittest.TestCase):
 
 
 class SummaryTest(unittest.TestCase):
-    """Offline summaries: the hover brief and the full "内容总结" body."""
+    """Offline summaries: the hover brief and the full "内容总结" body.
+
+    These assertions describe the deterministic engine, so the LLM path is
+    pinned off regardless of whether the developer has an API key configured.
+    """
+
+    def setUp(self):
+        patcher = mock.patch(
+            "webapp.app.summarize.llm_status",
+            return_value={"available": False, "reason": "test", "model": "", "base_url": ""},
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def build(self, pages):
         records, _ = extract_records_heuristic(pages)
@@ -294,6 +315,246 @@ class AnswerFormatTest(unittest.TestCase):
         result = build_answer("股票收益率", [], llm_available=False)
         self.assertIn("没有相关信息", result["answer"])
         self.assertEqual(result["citations"], [])
+
+
+class AccountTest(unittest.TestCase):
+    """Credentials, sessions and profile data (no HTTP, no network)."""
+
+    def setUp(self):
+        self.db = Database(Path(tempfile.mkdtemp()) / "accounts.db")
+        self.accounts = Accounts(self.db)
+
+    def register(self, username="alice", password="secret123", **profile):
+        return self.accounts.register(
+            {"username": username, "password": password, **profile}
+        )
+
+    # -- password hashing -------------------------------------------------- #
+
+    def test_password_is_never_stored_in_clear_text(self):
+        self.register()
+        row = self.db.one("SELECT password_hash FROM users WHERE username = 'alice'")
+        self.assertNotIn("secret123", row["password_hash"])
+        self.assertTrue(row["password_hash"].startswith("scrypt$"))
+
+    def test_hash_is_salted_so_equal_passwords_differ(self):
+        self.assertNotEqual(hash_password("same"), hash_password("same"))
+
+    def test_verify_accepts_only_the_right_password(self):
+        stored = hash_password("secret123")
+        self.assertTrue(verify_password("secret123", stored))
+        self.assertFalse(verify_password("secret124", stored))
+        self.assertFalse(verify_password("secret123", "not-a-hash"))
+
+    def test_user_payload_hides_the_hash(self):
+        user = self.register()
+        self.assertNotIn("password_hash", user)
+
+    # -- validation -------------------------------------------------------- #
+
+    def test_duplicate_username_is_rejected(self):
+        self.register()
+        with self.assertRaises(AuthError) as ctx:
+            self.register()
+        self.assertEqual(ctx.exception.status, 409)
+
+    def test_short_or_malformed_credentials_are_rejected(self):
+        for username, password in [
+            ("ab", "secret123"),       # username too short
+            ("bad name", "secret123"),  # space not allowed
+            ("good_user", "12345"),     # password too short
+        ]:
+            with self.assertRaises(AuthError):
+                self.register(username, password)
+
+    def test_invalid_email_is_rejected(self):
+        with self.assertRaises(AuthError):
+            self.register(email="not-an-email")
+
+    # -- login / sessions -------------------------------------------------- #
+
+    def test_wrong_password_and_unknown_user_look_identical(self):
+        """Do not leak whether an account exists."""
+        self.register()
+        errors = []
+        for body in [
+            {"username": "alice", "password": "wrong"},
+            {"username": "ghost", "password": "wrong"},
+        ]:
+            with self.assertRaises(AuthError) as ctx:
+                self.accounts.login(body)
+            errors.append((str(ctx.exception), ctx.exception.status))
+        self.assertEqual(errors[0], errors[1])
+
+    def test_session_token_resolves_then_stops_after_logout(self):
+        user = self.register()
+        token = self.accounts.open_session(user["id"])
+        self.assertEqual(self.accounts.user_for_token(token)["username"], "alice")
+        self.accounts.close_session(token)
+        self.assertIsNone(self.accounts.user_for_token(token))
+
+    def test_unknown_and_expired_tokens_are_refused(self):
+        user = self.register()
+        self.assertIsNone(self.accounts.user_for_token("nope"))
+        self.assertIsNone(self.accounts.user_for_token(None))
+        token = self.accounts.open_session(user["id"])
+        self.db.execute(
+            "UPDATE sessions SET expires_at = '2000-01-01T00:00:00+00:00' WHERE token = ?",
+            (token,),
+        )
+        self.assertIsNone(self.accounts.user_for_token(token))
+
+    def test_changing_the_password_invalidates_existing_sessions(self):
+        user = self.register()
+        token = self.accounts.open_session(user["id"])
+        self.accounts.change_password(
+            user["id"], {"old_password": "secret123", "new_password": "newpass456"}
+        )
+        self.assertIsNone(self.accounts.user_for_token(token))
+        self.assertTrue(self.accounts.login({"username": "alice", "password": "newpass456"}))
+
+    def test_changing_the_password_requires_the_old_one(self):
+        user = self.register()
+        with self.assertRaises(AuthError) as ctx:
+            self.accounts.change_password(
+                user["id"], {"old_password": "wrong", "new_password": "newpass456"}
+            )
+        self.assertEqual(ctx.exception.status, 403)
+
+    # -- profile ----------------------------------------------------------- #
+
+    def test_profile_survives_as_server_side_state(self):
+        """What makes a different device show the same details."""
+        user = self.register(display_name="爱丽丝", institution="复旦")
+        self.accounts.update_profile(user["id"], {"research_area": "介孔材料"})
+        # A fresh Accounts instance stands in for another device's request.
+        fresh = Accounts(Database(self.db.path)).require_user(user["id"])
+        self.assertEqual(fresh["display_name"], "爱丽丝")
+        self.assertEqual(fresh["institution"], "复旦")
+        self.assertEqual(fresh["research_area"], "介孔材料")
+
+    def test_unknown_profile_fields_are_ignored(self):
+        user = self.register()
+        with self.assertRaises(AuthError):
+            self.accounts.update_profile(user["id"], {"is_admin": True})
+
+    def test_display_name_defaults_to_the_username(self):
+        self.assertEqual(self.register()["display_name"], "alice")
+
+
+class StaticAssetCacheTest(unittest.TestCase):
+    """A stale cached app.js next to a fresh index.html breaks every binding.
+
+    That failure is silent (one TypeError skips all later addEventListener
+    calls), so these guards are cheap insurance.
+    """
+
+    def html(self):
+        return (ROOT / "webapp" / "static" / "index.html").read_text(encoding="utf-8")
+
+    def test_assets_are_requested_with_a_version_query(self):
+        html = self.html()
+        self.assertIn("/static/style.css?v=__ASSET_V__", html)
+        self.assertIn("/static/app.js?v=__ASSET_V__", html)
+
+    def test_index_route_substitutes_a_real_hash(self):
+        source = (ROOT / "webapp" / "app" / "main.py").read_text(encoding="utf-8")
+        self.assertIn('html.replace("__ASSET_V__", _asset_version())', source)
+        # The placeholder must never reach the browser verbatim.
+        index_body = source.split("def index(")[1].split("\n@app.")[0]
+        self.assertIn("no-store", index_body)
+
+    def test_version_changes_when_a_bundle_changes(self):
+        import importlib
+
+        main = importlib.import_module("webapp.app.main")
+        first = main._asset_version()
+        self.assertRegex(first, r"^[0-9a-f]{12}$")
+        self.assertEqual(first, main._asset_version())  # stable for same bytes
+
+    def test_every_top_level_listener_tolerates_a_missing_node(self):
+        """No bare $("id").addEventListener at top level: use on() instead."""
+        app_js = (ROOT / "webapp" / "static" / "app.js").read_text(encoding="utf-8")
+        bare = re.findall(r'^\$\("[A-Za-z0-9_]+"\)\.addEventListener', app_js, re.M)
+        self.assertEqual(bare, [], f"{len(bare)} 处顶层绑定未使用 on() 包装")
+
+
+class AutoSummaryTest(unittest.TestCase):
+    """The summary is produced by the extraction job, not by a manual click."""
+
+    def test_extraction_job_runs_the_summary_stage(self):
+        """`_run_job` must report a 生成总结 stage and persist the result."""
+        source = (ROOT / "webapp" / "app" / "main.py").read_text(encoding="utf-8")
+        job_body = source.split("def _run_job(")[1].split("\n@app.")[0]
+        self.assertIn("_refresh_summary(", job_body)
+        self.assertIn("生成内容总结", job_body)
+
+    def test_summary_failure_cannot_fail_the_extraction(self):
+        """A broken summary degrades to an issue; records are already stored."""
+        source = (ROOT / "webapp" / "app" / "main.py").read_text(encoding="utf-8")
+        job_body = source.split("def _run_job(")[1].split("\n@app.")[0]
+        summary_call = job_body.split("progress(\"生成内容总结\"")[1]
+        self.assertIn("except Exception", summary_call.split("db.execute")[0])
+
+    def test_front_end_maps_the_new_stage_to_a_step(self):
+        app_js = (ROOT / "webapp" / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn('"生成总结"', app_js)
+        self.assertIn('stage.includes("总结")', app_js)
+
+
+class PaperOwnershipTest(unittest.TestCase):
+    """Library queries are per-account; the QA corpus is shared."""
+
+    def setUp(self):
+        self.db = Database(Path(tempfile.mkdtemp()) / "owners.db")
+        accounts = Accounts(self.db)
+        self.alice = accounts.register({"username": "alice", "password": "secret123"})
+        self.bob = accounts.register({"username": "bob", "password": "secret456"})
+        self.add_paper(1, self.alice["id"], "alice 的论文")
+        self.add_paper(2, self.alice["id"], "alice 的第二篇")
+        self.add_paper(3, self.bob["id"], "bob 的论文")
+
+    def add_paper(self, index, owner, title):
+        paper_fk = self.db.execute(
+            "INSERT INTO papers (paper_key, paper_id, owner_fk, title, created_at)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (f"paper_{index:03d}", index, owner, title, now()),
+        )
+        self.db.execute(
+            "INSERT INTO paper_pages (paper_fk, page, text) VALUES (?, 1, ?)",
+            (paper_fk, f"{title} 的正文，提到 mesoporous silica 与 TEOS。"),
+        )
+        return paper_fk
+
+    def own_papers(self, user):
+        return self.db.query(
+            "SELECT * FROM papers WHERE owner_fk = ? ORDER BY paper_id", (user["id"],)
+        )
+
+    def test_each_account_sees_only_its_own_library(self):
+        self.assertEqual(len(self.own_papers(self.alice)), 2)
+        self.assertEqual(len(self.own_papers(self.bob)), 1)
+
+    def test_a_paper_is_invisible_to_the_other_account(self):
+        alice_paper = self.own_papers(self.alice)[0]["id"]
+        self.assertIsNone(
+            self.db.one(
+                "SELECT id FROM papers WHERE id = ? AND owner_fk = ?",
+                (alice_paper, self.bob["id"]),
+            )
+        )
+
+    def test_shared_corpus_spans_every_account(self):
+        """The asymmetry the product requires: private shelves, shared corpus."""
+        pages = self.db.query(
+            "SELECT paper_fk FROM paper_pages JOIN papers ON papers.id = paper_pages.paper_fk"
+        )
+        self.assertEqual(len({row["paper_fk"] for row in pages}), 3)
+
+    def test_deleting_an_account_removes_its_papers_only(self):
+        self.db.execute("DELETE FROM users WHERE id = ?", (self.bob["id"],))
+        remaining = self.db.query("SELECT owner_fk FROM papers")
+        self.assertEqual({row["owner_fk"] for row in remaining}, {self.alice["id"]})
 
 
 if __name__ == "__main__":

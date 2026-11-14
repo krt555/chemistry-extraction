@@ -5,10 +5,70 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>化学文献信息提取</title>
-  <link rel="stylesheet" href="/static/style.css" />
+  <!-- ?v= 由后端按文件内容哈希注入：改一次代码就换一次 URL，
+       浏览器不会拿旧缓存的 CSS/JS 去配新 HTML（会导致按钮失效）。 -->
+  <link rel="stylesheet" href="/static/style.css?v=__ASSET_V__" />
 </head>
 
 <body>
+  <!-- 登录弹窗：由右上角头像唤出；首次访问自动弹出，可关闭后浏览公共问答 -->
+  <div class="auth-gate" id="authGate" hidden>
+    <div class="auth-card">
+      <button class="icon-btn auth-close" id="authClose" title="关闭" aria-label="关闭">×</button>
+      <div class="auth-brand">
+        <div class="brand-mark">CE</div>
+        <div>
+          <strong>化学文献信息提取</strong>
+          <span>介孔材料合成条件抽取与检索平台</span>
+        </div>
+      </div>
+
+      <div class="auth-tabs" id="authTabs">
+        <button class="auth-tab active" data-mode="login">登录</button>
+        <button class="auth-tab" data-mode="register">注册</button>
+      </div>
+
+      <form class="auth-form" id="authForm">
+        <label class="auth-row">
+          <span>用户名</span>
+          <input class="input" id="authUsername" autocomplete="username" spellcheck="false"
+            placeholder="3-32 位字母、数字、下划线" />
+        </label>
+        <label class="auth-row">
+          <span>密码</span>
+          <input class="input" id="authPassword" type="password" autocomplete="current-password"
+            placeholder="至少 6 位" />
+        </label>
+
+        <!-- 注册时才出现的个人信息，可留空，之后在「个人信息」里补 -->
+        <div class="auth-extra" id="authExtra" hidden>
+          <label class="auth-row">
+            <span>昵称</span>
+            <input class="input" id="authDisplayName" placeholder="展示用名称，留空则用用户名" />
+          </label>
+          <label class="auth-row">
+            <span>邮箱</span>
+            <input class="input" id="authEmail" spellcheck="false" placeholder="选填" />
+          </label>
+          <label class="auth-row">
+            <span>单位</span>
+            <input class="input" id="authInstitution" placeholder="选填，例如 复旦大学化学系" />
+          </label>
+          <label class="auth-row">
+            <span>研究方向</span>
+            <input class="input" id="authResearchArea" placeholder="选填，例如 介孔二氧化硅" />
+          </label>
+        </div>
+
+        <div class="auth-error" id="authError" hidden></div>
+        <button class="btn primary auth-submit" id="authSubmit" type="submit">登录</button>
+        <p class="auth-note" id="authNote">
+          账号数据保存在服务端，换设备登录同一账号即可看到相同的文献库与个人信息。
+        </p>
+      </form>
+    </div>
+  </div>
+
   <div class="app">
 
     <aside class="sidebar">
@@ -87,6 +147,41 @@
             <span>＋ 上传 PDF</span>
             <input id="fileInput" type="file" accept="application/pdf" multiple hidden />
           </label>
+
+          <!-- 右上角头像：未登录时点开去登录/注册，已登录时点开账号菜单 -->
+          <div class="account-menu" id="accountMenu">
+            <button class="avatar-btn" id="avatarBtn" aria-haspopup="true" aria-expanded="false"
+              title="账号">
+              <span class="avatar-letter" id="accountAvatar">?</span>
+            </button>
+
+            <div class="account-pop" id="accountPop" hidden>
+              <!-- 未登录态 -->
+              <div class="account-pop-anon" id="accountPopAnon">
+                <strong>还没有登录</strong>
+                <p>登录后文献库、个人信息会跟随账号，换设备也能看到同样的内容。</p>
+                <div class="account-pop-actions">
+                  <button class="btn primary sm" id="popLogin">登录</button>
+                  <button class="btn sm" id="popRegister">注册</button>
+                </div>
+              </div>
+
+              <!-- 已登录态 -->
+              <div class="account-pop-user" id="accountPopUser" hidden>
+                <div class="account-pop-head">
+                  <span class="account-avatar lg" id="popAvatar">?</span>
+                  <span class="account-pop-text">
+                    <strong id="accountName">未登录</strong>
+                    <span id="accountMeta">—</span>
+                  </span>
+                </div>
+                <div class="account-pop-menu">
+                  <button id="popProfile">个人信息</button>
+                  <button id="popLogout" class="danger">退出登录</button>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       </header>
 
@@ -97,10 +192,10 @@
             <div class="ask-scope">
               <span class="ask-scope-label">问答范围</span>
               <select class="select" id="askScope">
-                <option value="">全部论文</option>
+                <option value="">全部论文（共享语料）</option>
               </select>
             </div>
-            <span class="ask-scope-note" id="askScopeLabel">全部论文</span>
+            <span class="ask-scope-note" id="askScopeLabel">全部论文（共享语料）</span>
           </div>
           <div class="ask-body" id="askBody">
             <div class="ask-msg bot">
@@ -110,7 +205,8 @@
                 <button class="chip">用了什么表面活性剂？</button>
                 <button class="chip">煅烧温度和时间是多少？</button>
               </div>
-              <p class="muted">只依据已上传论文的原文作答，不会凭空编造。每条回答都附带页码引文，点击即可跳到原文。</p>
+              <p class="muted">只依据平台内已收录论文的原文作答，不会凭空编造。<b>问答覆盖全部用户共享的论文库</b>，
+                文献库页面只显示你自己上传的部分。每条回答都附带页码引文，点击即可跳到原文（他人论文的引文不可跳转）。</p>
             </div>
           </div>
           <form class="ask-form" id="askForm">
@@ -370,6 +466,68 @@
       </section>
     </main>
 
+    <!-- ---------------- 个人信息 ---------------- -->
+    <div class="modal-mask" id="profileMask" hidden>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="profileTitle">
+        <div class="modal-head">
+          <div>
+            <strong id="profileTitle">个人信息</strong>
+            <span id="profileSub">保存在服务端，换设备登录同一账号即可看到</span>
+          </div>
+          <button class="icon-btn" id="profileClose">×</button>
+        </div>
+
+        <div class="modal-body">
+          <div class="profile-stats" id="profileStats"></div>
+
+          <label class="setting-row">
+            <span class="setting-label">昵称</span>
+            <input class="input" id="profileDisplayName" maxlength="60" />
+          </label>
+          <label class="setting-row">
+            <span class="setting-label">邮箱</span>
+            <input class="input" id="profileEmail" maxlength="120" spellcheck="false" />
+          </label>
+          <label class="setting-row">
+            <span class="setting-label">单位</span>
+            <input class="input" id="profileInstitution" maxlength="120" />
+          </label>
+          <label class="setting-row">
+            <span class="setting-label">研究方向</span>
+            <input class="input" id="profileResearchArea" maxlength="120" />
+          </label>
+          <label class="setting-row">
+            <span class="setting-label">简介</span>
+            <textarea class="input note-input" id="profileBio" rows="3" maxlength="1000"></textarea>
+          </label>
+
+          <details class="setting-adv" id="profilePwdBlock">
+            <summary>修改密码</summary>
+            <label class="setting-row">
+              <span class="setting-label">当前密码</span>
+              <input class="input" id="profileOldPwd" type="password" autocomplete="current-password" />
+            </label>
+            <label class="setting-row">
+              <span class="setting-label">新密码</span>
+              <input class="input" id="profileNewPwd" type="password" autocomplete="new-password"
+                placeholder="至少 6 位" />
+            </label>
+            <p class="setting-hint">改密后其他设备的登录会失效，需要重新登录。</p>
+            <button class="btn" id="profilePwdSave" type="button">更新密码</button>
+          </details>
+
+          <div class="setting-result" id="profileResult" hidden></div>
+        </div>
+
+        <div class="modal-foot">
+          <button class="btn danger" id="profileLogout">退出登录</button>
+          <span class="modal-foot-gap"></span>
+          <button class="btn" id="profileCancel">取消</button>
+          <button class="btn primary" id="profileSave">保存</button>
+        </div>
+      </div>
+    </div>
+
     <!-- ---------------- 自定义命名与备注 ---------------- -->
     <div class="modal-mask" id="renameMask" hidden>
       <div class="modal" role="dialog" aria-modal="true" aria-labelledby="renameTitle">
@@ -535,7 +693,7 @@
 
     <div class="toast-wrap" id="toastWrap"></div>
   </div>
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=__ASSET_V__"></script>
 </body>
 
 </html>

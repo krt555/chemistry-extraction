@@ -14,16 +14,30 @@ import hashlib
 import io
 import json
 import re
+import sqlite3
 import threading
 import traceback
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, Request, UploadFile, File
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 
 from .db import Database, dumps, loads, now
+from .auth import (
+    Accounts,
+    AuthError,
+    SESSION_COOKIE,
+    SESSION_DAYS,
+    user_payload,
+)
 from .demo import DEMO_PAPERS
 from .pdfgen import render_demo_pdf
 from .extraction import (
@@ -61,6 +75,130 @@ db = Database(DATA_DIR / "mesoscope.db")
 
 app = FastAPI(title="MesoScope", version="1.0.0")
 _JOB_LOCK = threading.Lock()
+accounts = Accounts(db)
+
+
+# --------------------------------------------------------------------------- #
+# authentication
+# --------------------------------------------------------------------------- #
+
+def _token_of(request: Request) -> str | None:
+    """Session token from the cookie, or the Authorization header."""
+    cookie = request.cookies.get(SESSION_COOKIE)
+    if cookie:
+        return cookie
+    header = request.headers.get("authorization") or ""
+    return header[7:].strip() if header.lower().startswith("bearer ") else None
+
+
+def current_user(request: Request) -> dict[str, Any]:
+    """Resolve the signed-in user or fail with 401."""
+    row = accounts.user_for_token(_token_of(request))
+    if not row:
+        raise HTTPException(401, "请先登录")
+    return row
+
+
+def optional_user(request: Request) -> dict[str, Any] | None:
+    return accounts.user_for_token(_token_of(request))
+
+
+def _set_session_cookie(response: JSONResponse, token: str) -> None:
+    response.set_cookie(
+        SESSION_COOKIE,
+        token,
+        max_age=SESSION_DAYS * 24 * 3600,
+        httponly=True,
+        samesite="lax",
+        path="/",
+    )
+
+
+@app.post("/api/auth/register")
+async def api_register(request: Request) -> JSONResponse:
+    """Create an account and sign in immediately.
+
+    The very first account also adopts any papers that predate the account
+    system, so an existing single-user library is not orphaned by the upgrade.
+    Later accounts start empty.
+    """
+    body = await request.json()
+    first_account = not db.one("SELECT id FROM users LIMIT 1")
+    try:
+        user = accounts.register(body)
+    except AuthError as exc:
+        raise HTTPException(exc.status, str(exc)) from exc
+
+    adopted = 0
+    if first_account:
+        adopted = db.execute(
+            "UPDATE papers SET owner_fk = ? WHERE owner_fk IS NULL", (user["id"],)
+        )
+        adopted = int(
+            (db.one("SELECT COUNT(*) AS n FROM papers WHERE owner_fk = ?", (user["id"],)) or {})
+            .get("n")
+            or 0
+        )
+
+    token = accounts.open_session(user["id"])
+    response = JSONResponse({"user": user, "token": token, "adopted_papers": adopted})
+    _set_session_cookie(response, token)
+    return response
+
+
+@app.post("/api/auth/login")
+async def api_login(request: Request) -> JSONResponse:
+    body = await request.json()
+    try:
+        row = accounts.login(body)
+    except AuthError as exc:
+        raise HTTPException(exc.status, str(exc)) from exc
+    token = accounts.open_session(row["id"])
+    response = JSONResponse({"user": user_payload(row), "token": token})
+    _set_session_cookie(response, token)
+    return response
+
+
+@app.post("/api/auth/logout")
+async def api_logout(request: Request) -> JSONResponse:
+    accounts.close_session(_token_of(request) or "")
+    response = JSONResponse({"ok": True})
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    return response
+
+
+@app.get("/api/auth/me")
+def api_me(request: Request) -> dict[str, Any]:
+    """Who am I — used by the front-end on boot to restore the session."""
+    row = optional_user(request)
+    if not row:
+        return {"user": None}
+    return {"user": user_payload(row), "stats": accounts.stats(row["id"])}
+
+
+@app.put("/api/auth/profile")
+async def api_update_profile(request: Request) -> dict[str, Any]:
+    user = current_user(request)
+    body = await request.json()
+    try:
+        return {"user": accounts.update_profile(user["id"], body)}
+    except AuthError as exc:
+        raise HTTPException(exc.status, str(exc)) from exc
+
+
+@app.put("/api/auth/password")
+async def api_change_password(request: Request) -> JSONResponse:
+    """Change the password and re-issue this device's session."""
+    user = current_user(request)
+    body = await request.json()
+    try:
+        accounts.change_password(user["id"], body)
+    except AuthError as exc:
+        raise HTTPException(exc.status, str(exc)) from exc
+    token = accounts.open_session(user["id"])
+    response = JSONResponse({"ok": True, "token": token})
+    _set_session_cookie(response, token)
+    return response
 
 
 # --------------------------------------------------------------------------- #
@@ -77,10 +215,17 @@ def _safe_title(filename: str) -> str:
     return re.sub(r"\s+", " ", stem).strip()[:200] or "未命名论文"
 
 
-def _paper_row(paper_fk: int) -> dict[str, Any]:
-    row = db.one("SELECT * FROM papers WHERE id = ?", (paper_fk,))
+def _owned_paper_row(paper_fk: int, user: dict[str, Any]) -> dict[str, Any]:
+    """A paper the signed-in user owns; other people's papers read as 404.
+
+    The shared corpus is only ever reached through the QA retriever, never
+    through these per-paper endpoints.
+    """
+    row = db.one(
+        "SELECT * FROM papers WHERE id = ? AND owner_fk = ?", (paper_fk, user["id"])
+    )
     if not row:
-        raise HTTPException(404, "论文不存在")
+        raise HTTPException(404, "论文不存在，或不属于当前账号")
     return row
 
 
@@ -169,22 +314,80 @@ def _store_pages(paper_fk: int, pages: list[str]) -> None:
         )
 
 
+def _materialize_pdf(row: dict[str, Any]) -> Path:
+    """Local path for the PDF, writing the database blob out when needed.
+
+    The loader works on files, while the canonical copy now lives in the
+    database so it follows the account across devices.
+    """
+    target = UPLOAD_DIR / f"{row['paper_key']}.pdf"
+    blob = row.get("pdf_blob")
+    if blob:
+        payload = bytes(blob)
+        if not target.exists() or target.stat().st_size != len(payload):
+            target.write_bytes(payload)
+        return target
+
+    legacy = Path(row.get("pdf_path") or "")
+    if legacy and not legacy.is_absolute():
+        legacy = ROOT / legacy
+    if legacy and legacy.exists():
+        return legacy
+    raise RuntimeError("PDF 文件不存在，无法解析")
+
+
+def _refresh_summary(
+    paper_fk: int,
+    title: str,
+    pages: list[str],
+    records: list[dict[str, Any]],
+) -> dict[str, str]:
+    """Build the content summary and store it on the paper.
+
+    Shared by the extraction job (automatic) and the manual refresh endpoint,
+    so both paths always produce the same thing.
+    """
+    result = build_summary(title=title, pages=pages, records=records)
+    db.execute(
+        "UPDATE papers SET summary = ?, summary_brief = ?, summary_engine = ?,"
+        " summary_at = ? WHERE id = ?",
+        (result["summary"], result["brief"], result["engine"], now(), paper_fk),
+    )
+    return result
+
+
 # --------------------------------------------------------------------------- #
 # papers
 # --------------------------------------------------------------------------- #
 
 @app.get("/api/status")
-def api_status() -> dict[str, Any]:
+def api_status(request: Request) -> dict[str, Any]:
+    """Engine state plus counts.
+
+    Counts are per-account (what the library shows), except ``shared_papers``
+    which reports the size of the corpus the assistant can draw on.
+    """
     status = llm_status()
-    counts = db.one(
-        "SELECT (SELECT COUNT(*) FROM papers) AS papers,"
-        " (SELECT COUNT(*) FROM records) AS records,"
-        " (SELECT COUNT(*) FROM records WHERE reviewed=1) AS reviewed,"
-        " (SELECT COUNT(*) FROM jobs WHERE status='running') AS running"
-    ) or {}
+    user = optional_user(request)
+    if user:
+        counts = db.one(
+            "SELECT (SELECT COUNT(*) FROM papers WHERE owner_fk = ?) AS papers,"
+            " (SELECT COUNT(*) FROM records JOIN papers ON papers.id = records.paper_fk"
+            "   WHERE papers.owner_fk = ?) AS records,"
+            " (SELECT COUNT(*) FROM records JOIN papers ON papers.id = records.paper_fk"
+            "   WHERE papers.owner_fk = ? AND records.reviewed = 1) AS reviewed,"
+            " (SELECT COUNT(*) FROM jobs JOIN papers ON papers.id = jobs.paper_fk"
+            "   WHERE papers.owner_fk = ? AND jobs.status = 'running') AS running",
+            (user["id"], user["id"], user["id"], user["id"]),
+        ) or {}
+    else:
+        counts = {"papers": 0, "records": 0, "reviewed": 0, "running": 0}
+    shared = db.one("SELECT COUNT(*) AS n FROM papers") or {}
     return {
         "llm": status,
         "counts": {key: int(value or 0) for key, value in counts.items()},
+        "shared_papers": int(shared.get("n") or 0),
+        "user": user_payload(user) if user else None,
         "fields": [{"key": key, "label": FIELD_LABELS[key]} for key in FIELD_KEYS],
         "modes": EXTRACTION_MODES,
     }
@@ -286,14 +489,19 @@ def api_delete_llm_settings() -> dict[str, Any]:
 
 
 @app.get("/api/papers")
-def api_papers() -> dict[str, Any]:
-    rows = db.query("SELECT * FROM papers ORDER BY paper_id")
+def api_papers(request: Request) -> dict[str, Any]:
+    """Only the signed-in user's own library."""
+    user = current_user(request)
+    rows = db.query(
+        "SELECT * FROM papers WHERE owner_fk = ? ORDER BY paper_id", (user["id"],)
+    )
     return {"papers": [_paper_payload(row) for row in rows]}
 
 
 @app.get("/api/papers/{paper_fk}")
-def api_paper(paper_fk: int) -> dict[str, Any]:
-    row = _paper_row(paper_fk)
+def api_paper(paper_fk: int, request: Request) -> dict[str, Any]:
+    user = current_user(request)
+    row = _owned_paper_row(paper_fk, user)
     payload = _paper_payload(row)
     records = db.query(
         "SELECT * FROM records WHERE paper_fk = ? ORDER BY record_index", (paper_fk,)
@@ -307,19 +515,28 @@ def api_paper(paper_fk: int) -> dict[str, Any]:
 
 
 @app.get("/api/papers/{paper_fk}/pdf")
-def api_paper_pdf(paper_fk: int) -> FileResponse:
-    row = _paper_row(paper_fk)
-    path = Path(row["pdf_path"])
-    if not path.is_absolute():
+def api_paper_pdf(paper_fk: int, request: Request):
+    """Serve the PDF from the database, falling back to the legacy file path."""
+    user = current_user(request)
+    row = _owned_paper_row(paper_fk, user)
+    blob = row.get("pdf_blob")
+    headers = {"Content-Disposition": f'inline; filename="{row["paper_key"]}.pdf"'}
+    if blob:
+        return Response(bytes(blob), media_type="application/pdf", headers=headers)
+
+    # Papers uploaded before PDFs moved into the database still live on disk.
+    path = Path(row["pdf_path"] or "")
+    if path and not path.is_absolute():
         path = ROOT / path
-    if not path.exists():
-        raise HTTPException(404, "PDF 文件不存在（可能是演示数据，无原始文件）")
-    return FileResponse(path, media_type="application/pdf", filename=row["filename"])
+    if path and path.exists():
+        return FileResponse(path, media_type="application/pdf", filename=row["filename"])
+    raise HTTPException(404, "PDF 文件不存在（可能是演示数据，无原始文件）")
 
 
 @app.get("/api/papers/{paper_fk}/pages/{page}")
-def api_paper_page(paper_fk: int, page: int) -> dict[str, Any]:
-    _paper_row(paper_fk)
+def api_paper_page(paper_fk: int, page: int, request: Request) -> dict[str, Any]:
+    user = current_user(request)
+    _owned_paper_row(paper_fk, user)
     row = db.one(
         "SELECT text FROM paper_pages WHERE paper_fk = ? AND page = ?", (paper_fk, page)
     )
@@ -330,9 +547,11 @@ def api_paper_page(paper_fk: int, page: int) -> dict[str, Any]:
 
 @app.post("/api/papers")
 async def api_upload(
+    request: Request,
     file: UploadFile = File(...),
     allow_duplicate: bool = Query(False, description="为 true 时跳过重复校验，强制再传一份"),
 ) -> dict[str, Any]:
+    user = current_user(request)
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(400, "只接受 PDF 文件")
 
@@ -341,17 +560,19 @@ async def api_upload(
         raise HTTPException(400, "文件内容为空")
     content_hash = hashlib.sha256(payload).hexdigest()
 
-    # 重复判定：优先比对文件内容指纹，其次比对原始文件名。
-    # 内容相同但改了名、或同名文件重复拖拽，都能识别出来。
+    # 重复判定只在当前账号的文献库内进行：别人上传过同一篇，不该阻止我也收录一份，
+    # 也不该把别人的记录暴露给我。
     if not allow_duplicate:
         existing = db.one(
-            "SELECT * FROM papers WHERE content_hash = ? AND content_hash != '' ORDER BY id LIMIT 1",
-            (content_hash,),
+            "SELECT * FROM papers WHERE owner_fk = ? AND content_hash = ?"
+            " AND content_hash != '' ORDER BY id LIMIT 1",
+            (user["id"], content_hash),
         )
         reason = "content"
         if not existing:
             existing = db.one(
-                "SELECT * FROM papers WHERE filename = ? ORDER BY id LIMIT 1", (file.filename,)
+                "SELECT * FROM papers WHERE owner_fk = ? AND filename = ? ORDER BY id LIMIT 1",
+                (user["id"], file.filename),
             )
             reason = "filename"
         if existing:
@@ -368,6 +589,8 @@ async def api_upload(
 
     paper_id = _next_paper_id()
     paper_key = f"paper_{paper_id:03d}"
+    # 解析需要一个真实文件路径，用临时文件；正文随后以 BLOB 入库，
+    # 这样换设备登录也能取到原始 PDF。
     target = UPLOAD_DIR / f"{paper_key}.pdf"
     target.write_bytes(payload)
 
@@ -381,17 +604,20 @@ async def api_upload(
     title = _safe_title(file.filename)
     paper_fk = db.execute(
         """
-        INSERT INTO papers (paper_key, paper_id, title, original_title, filename, pdf_path,
-                            pages, chars, n_tables, content_hash, source, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'upload', ?)
+        INSERT INTO papers (paper_key, paper_id, owner_fk, title, original_title, filename,
+                            pdf_path, pdf_blob, pages, chars, n_tables, content_hash,
+                            source, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'upload', ?)
         """,
         (
             paper_key,
             paper_id,
+            user["id"],
             title,
             title,
             file.filename,
             str(target.relative_to(ROOT)).replace("\\", "/"),
+            sqlite3.Binary(payload),
             int(stats["pages"]),
             int(stats["chars"]),
             int(stats["tables"]),
@@ -400,7 +626,7 @@ async def api_upload(
         ),
     )
     _store_pages(paper_fk, paper.pages_with_tables)
-    return _paper_payload(_paper_row(paper_fk))
+    return _paper_payload(_owned_paper_row(paper_fk, user))
 
 
 TITLE_MAX = 200
@@ -414,7 +640,7 @@ async def api_rename_paper(paper_fk: int, request: Request) -> dict[str, Any]:
     ``title`` empty (or omitted together with a ``reset_title`` flag) restores
     the name produced at import time, so a rename is never destructive.
     """
-    row = _paper_row(paper_fk)
+    row = _owned_paper_row(paper_fk, current_user(request))
     body = await request.json()
 
     original = row.get("original_title") or row["title"]
@@ -437,13 +663,16 @@ async def api_rename_paper(paper_fk: int, request: Request) -> dict[str, Any]:
         f"UPDATE papers SET {assignments}, original_title = ? WHERE id = ?",
         (*updates.values(), original, paper_fk),
     )
-    return _paper_payload(_paper_row(paper_fk))
+    return _paper_payload(db.one("SELECT * FROM papers WHERE id = ?", (paper_fk,)) or {})
 
 
 @app.post("/api/papers/{paper_fk}/summary")
-def api_build_summary(paper_fk: int, refresh: bool = Query(True)) -> dict[str, Any]:
+def api_build_summary(
+    paper_fk: int, request: Request, refresh: bool = Query(True)
+) -> dict[str, Any]:
     """Generate (or return the cached) content summary for one paper."""
-    row = _paper_row(paper_fk)
+    user = current_user(request)
+    row = _owned_paper_row(paper_fk, user)
     if not refresh and (row.get("summary") or ""):
         return _paper_payload(row)
 
@@ -462,20 +691,15 @@ def api_build_summary(paper_fk: int, refresh: bool = Query(True)) -> dict[str, A
             "SELECT * FROM records WHERE paper_fk = ? ORDER BY record_index", (paper_fk,)
         )
     ]
-    result = build_summary(title=row["title"], pages=pages, records=records)
-    db.execute(
-        "UPDATE papers SET summary = ?, summary_brief = ?, summary_engine = ?,"
-        " summary_at = ? WHERE id = ?",
-        (result["summary"], result["brief"], result["engine"], now(), paper_fk),
-    )
-    return _paper_payload(_paper_row(paper_fk))
+    _refresh_summary(paper_fk, row["title"], pages, records)
+    return _paper_payload(_owned_paper_row(paper_fk, user))
 
 
 @app.delete("/api/papers/{paper_fk}")
-def api_delete_paper(paper_fk: int) -> dict[str, Any]:
-    row = _paper_row(paper_fk)
+def api_delete_paper(paper_fk: int, request: Request) -> dict[str, Any]:
+    row = _owned_paper_row(paper_fk, current_user(request))
     db.execute("DELETE FROM papers WHERE id = ?", (paper_fk,))
-    path = ROOT / row["pdf_path"]
+    path = ROOT / (row["pdf_path"] or "")
     if row["source"] == "upload" and path.exists() and UPLOAD_DIR in path.parents:
         path.unlink(missing_ok=True)
     return {"ok": True}
@@ -499,7 +723,7 @@ def _run_job(job_fk: int, paper_fk: int, mode: str) -> None:
             "UPDATE jobs SET status='running', stage='解析 PDF', progress=15 WHERE id=?",
             (job_fk,),
         )
-        path = ROOT / row["pdf_path"]
+        path = _materialize_pdf(row)
         paper = load_paper(path)
         _store_pages(paper_fk, paper.pages_with_tables)
 
@@ -546,6 +770,14 @@ def _run_job(job_fk: int, paper_fk: int, mode: str) -> None:
                     ),
                 )
 
+        # 抽取完成后顺手生成内容总结：用户不需要再手动点一次「内容总结」。
+        # 这一步失败不影响抽取结果，只记一条 issue。
+        progress("生成内容总结", 95)
+        try:
+            _refresh_summary(paper_fk, row["title"], paper.pages_with_tables, records)
+        except Exception as exc:  # noqa: BLE001 - summary is a nice-to-have
+            issues.append(f"内容总结生成失败（可稍后在卡片上手动重试）：{exc}")
+
         db.execute(
             """
             UPDATE jobs SET status='succeeded', stage='完成', progress=100, engine=?, model=?,
@@ -575,12 +807,13 @@ def _run_job(job_fk: int, paper_fk: int, mode: str) -> None:
 
 @app.post("/api/jobs")
 async def api_create_job(request: Request) -> dict[str, Any]:
+    user = current_user(request)
     body = await request.json()
     paper_fk = int(body.get("paper_fk") or 0)
     mode = str(body.get("mode") or "anchored")
     if mode not in MODE_VALUES:
         raise HTTPException(400, "mode 不合法")
-    _paper_row(paper_fk)
+    _owned_paper_row(paper_fk, user)
 
     with _JOB_LOCK:
         active = db.one(
@@ -602,14 +835,15 @@ async def api_create_job(request: Request) -> dict[str, Any]:
 
 
 @app.get("/api/jobs/{job_fk}")
-def api_job(job_fk: int) -> dict[str, Any]:
+def api_job(job_fk: int, request: Request) -> dict[str, Any]:
+    user = current_user(request)
     row = db.one(
         """
         SELECT jobs.*, papers.paper_key, papers.title
         FROM jobs JOIN papers ON papers.id = jobs.paper_fk
-        WHERE jobs.id = ?
+        WHERE jobs.id = ? AND papers.owner_fk = ?
         """,
-        (job_fk,),
+        (job_fk, user["id"]),
     )
     if not row:
         raise HTTPException(404, "任务不存在")
@@ -622,14 +856,16 @@ def api_job(job_fk: int) -> dict[str, Any]:
 
 
 @app.get("/api/jobs")
-def api_jobs(limit: int = Query(30, ge=1, le=200)) -> dict[str, Any]:
+def api_jobs(request: Request, limit: int = Query(30, ge=1, le=200)) -> dict[str, Any]:
+    user = current_user(request)
     rows = db.query(
         """
         SELECT jobs.*, papers.paper_key, papers.title
         FROM jobs JOIN papers ON papers.id = jobs.paper_fk
+        WHERE papers.owner_fk = ?
         ORDER BY jobs.id DESC LIMIT ?
         """,
-        (limit,),
+        (user["id"], limit),
     )
     jobs = []
     for row in rows:
@@ -645,12 +881,25 @@ def api_jobs(limit: int = Query(30, ge=1, le=200)) -> dict[str, Any]:
 # records / review
 # --------------------------------------------------------------------------- #
 
+def _owned_record_row(record_fk: int, user: dict[str, Any]) -> dict[str, Any]:
+    """A record belonging to one of the user's own papers."""
+    row = db.one(
+        """
+        SELECT records.* FROM records JOIN papers ON papers.id = records.paper_fk
+        WHERE records.id = ? AND papers.owner_fk = ?
+        """,
+        (record_fk, user["id"]),
+    )
+    if not row:
+        raise HTTPException(404, "记录不存在，或不属于当前账号")
+    return row
+
+
 @app.put("/api/records/{record_fk}")
 async def api_update_record(record_fk: int, request: Request) -> dict[str, Any]:
+    user = current_user(request)
     body = await request.json()
-    row = db.one("SELECT * FROM records WHERE id = ?", (record_fk,))
-    if not row:
-        raise HTTPException(404, "记录不存在")
+    row = _owned_record_row(record_fk, user)
 
     fields = loads(row["fields_json"], {})
     incoming = body.get("fields") or {}
@@ -692,7 +941,8 @@ async def api_update_record(record_fk: int, request: Request) -> dict[str, Any]:
 
 
 @app.get("/api/records/{record_fk}/history")
-def api_record_history(record_fk: int) -> dict[str, Any]:
+def api_record_history(record_fk: int, request: Request) -> dict[str, Any]:
+    _owned_record_row(record_fk, current_user(request))
     rows = db.query(
         "SELECT id, field, old_value, new_value, created_at FROM edits WHERE record_fk = ?"
         " ORDER BY id DESC",
@@ -711,11 +961,10 @@ def api_record_history(record_fk: int) -> dict[str, Any]:
 @app.post("/api/records/{record_fk}/revert")
 async def api_revert_edit(record_fk: int, request: Request) -> dict[str, Any]:
     """Restore one field to the value it had before a given edit."""
+    user = current_user(request)
     body = await request.json()
     edit_id = int(body.get("edit_id") or 0)
-    record = db.one("SELECT * FROM records WHERE id = ?", (record_fk,))
-    if not record:
-        raise HTTPException(404, "记录不存在")
+    record = _owned_record_row(record_fk, user)
     edit = db.one(
         "SELECT * FROM edits WHERE id = ? AND record_fk = ?", (edit_id, record_fk)
     )
@@ -758,6 +1007,7 @@ async def api_revert_edit(record_fk: int, request: Request) -> dict[str, Any]:
 @app.post("/api/jobs/batch")
 async def api_batch_jobs(request: Request) -> dict[str, Any]:
     """Queue extraction for several papers at once."""
+    user = current_user(request)
     body = await request.json()
     ids = body.get("paper_fks") or []
     mode = str(body.get("mode") or "anchored")
@@ -773,9 +1023,12 @@ async def api_batch_jobs(request: Request) -> dict[str, Any]:
             paper_fk = int(raw)
         except (TypeError, ValueError):
             continue
-        paper = db.one("SELECT paper_key FROM papers WHERE id = ?", (paper_fk,))
+        paper = db.one(
+            "SELECT paper_key FROM papers WHERE id = ? AND owner_fk = ?",
+            (paper_fk, user["id"]),
+        )
         if not paper:
-            skipped.append({"paper_fk": paper_fk, "reason": "论文不存在"})
+            skipped.append({"paper_fk": paper_fk, "reason": "论文不存在或不属于当前账号"})
             continue
         with _JOB_LOCK:
             active = db.one(
@@ -801,6 +1054,7 @@ async def api_batch_jobs(request: Request) -> dict[str, Any]:
 @app.post("/api/papers/batch-delete")
 async def api_batch_delete(request: Request) -> dict[str, Any]:
     """Delete several papers and their records at once."""
+    user = current_user(request)
     body = await request.json()
     ids = body.get("paper_fks") or []
     if not isinstance(ids, list) or not ids:
@@ -813,7 +1067,9 @@ async def api_batch_delete(request: Request) -> dict[str, Any]:
             paper_fk = int(raw)
         except (TypeError, ValueError):
             continue
-        row = db.one("SELECT * FROM papers WHERE id = ?", (paper_fk,))
+        row = db.one(
+            "SELECT * FROM papers WHERE id = ? AND owner_fk = ?", (paper_fk, user["id"])
+        )
         if not row:
             continue
         active = db.one(
@@ -824,7 +1080,7 @@ async def api_batch_delete(request: Request) -> dict[str, Any]:
             blocked.append({"paper_key": row["paper_key"], "reason": "任务进行中"})
             continue
         db.execute("DELETE FROM papers WHERE id = ?", (paper_fk,))
-        path = ROOT / row["pdf_path"]
+        path = ROOT / (row["pdf_path"] or "")
         if row["source"] == "upload" and path.exists() and UPLOAD_DIR in path.parents:
             path.unlink(missing_ok=True)
         deleted.append(row["paper_key"])
@@ -845,6 +1101,7 @@ def _to_number(value: Any) -> float | None:
 
 @app.get("/api/search")
 def api_search(
+    request: Request,
     q: str = Query("", description="字段值关键词"),
     field: str = Query("", description="限定字段 key"),
     sa_min: float | None = None,
@@ -853,12 +1110,15 @@ def api_search(
     pore_max: float | None = None,
     reviewed_only: bool = False,
 ) -> dict[str, Any]:
+    user = current_user(request)
     rows = db.query(
         """
         SELECT records.*, papers.paper_key, papers.title, papers.paper_id AS paper_num
         FROM records JOIN papers ON papers.id = records.paper_fk
+        WHERE papers.owner_fk = ?
         ORDER BY papers.paper_id, records.record_index
-        """
+        """,
+        (user["id"],),
     )
     needle = q.strip().lower()
     results = []
@@ -891,15 +1151,21 @@ def api_search(
 
 
 @app.get("/api/export")
-def api_export(fmt: str = Query("jsonl", pattern="^(jsonl|csv)$"), paper_fk: int | None = None):
+def api_export(
+    request: Request,
+    fmt: str = Query("jsonl", pattern="^(jsonl|csv)$"),
+    paper_fk: int | None = None,
+):
+    user = current_user(request)
     sql = """
         SELECT records.*, papers.paper_key, papers.paper_id AS paper_num, papers.pdf_path
         FROM records JOIN papers ON papers.id = records.paper_fk
+        WHERE papers.owner_fk = ?
     """
-    params: tuple = ()
+    params: tuple = (user["id"],)
     if paper_fk:
-        sql += " WHERE records.paper_fk = ?"
-        params = (paper_fk,)
+        sql += " AND records.paper_fk = ?"
+        params = (user["id"], paper_fk)
     sql += " ORDER BY papers.paper_id, records.record_index"
     rows = db.query(sql, params)
 
@@ -948,34 +1214,59 @@ def api_export(fmt: str = Query("jsonl", pattern="^(jsonl|csv)$"), paper_fk: int
 # QA
 # --------------------------------------------------------------------------- #
 
-def _build_retriever(paper_fk: int | None) -> Retriever:
+def _build_retriever(paper_fk: int | None, user: dict[str, Any]) -> Retriever:
+    """Pages available for question answering.
+
+    Scope rules, deliberately asymmetric from the library view:
+
+    * no ``paper_fk`` — the **whole shared corpus**, every account's papers,
+      so the assistant benefits from everything the community uploaded;
+    * with ``paper_fk`` — that one paper, and only if the caller owns it,
+      because narrowing to a single paper is a library action.
+    """
     sql = """
-        SELECT paper_pages.page, paper_pages.text, papers.paper_key, papers.title, papers.id AS paper_fk
+        SELECT paper_pages.page, paper_pages.text, papers.paper_key, papers.title,
+               papers.id AS paper_fk, papers.owner_fk
         FROM paper_pages JOIN papers ON papers.id = paper_pages.paper_fk
     """
     params: tuple = ()
     if paper_fk:
-        sql += " WHERE papers.id = ?"
-        params = (paper_fk,)
+        sql += " WHERE papers.id = ? AND papers.owner_fk = ?"
+        params = (paper_fk, user["id"])
     chunks = [row for row in db.query(sql, params) if (row["text"] or "").strip()]
     return Retriever(chunks)
 
 
 @app.post("/api/ask")
 async def api_ask(request: Request) -> dict[str, Any]:
+    user = current_user(request)
     body = await request.json()
     question = str(body.get("question") or "").strip()
     if not question:
         raise HTTPException(400, "问题不能为空")
     paper_fk = body.get("paper_fk")
     paper_fk = int(paper_fk) if paper_fk else None
+    if paper_fk:
+        _owned_paper_row(paper_fk, user)
     top_k = int(body.get("top_k") or 4)
 
-    retriever = _build_retriever(paper_fk)
+    retriever = _build_retriever(paper_fk, user)
     hits = retriever.search(question, top_k=max(1, min(8, top_k)))
     result = build_answer(question, hits, llm_status()["available"])
     result["question"] = question
-    result["scope"] = "single" if paper_fk else "all"
+    result["scope"] = "single" if paper_fk else "shared"
+    # 标出哪些引文来自别人上传的论文：文献库里看不到它们，
+    # 但问答会用到，必须让用户知道来源不在自己库中。
+    own = {
+        row["id"]
+        for row in db.query("SELECT id FROM papers WHERE owner_fk = ?", (user["id"],))
+    }
+    for citation in result.get("citations", []):
+        match = db.one(
+            "SELECT id FROM papers WHERE paper_key = ?", (citation.get("paper_key"),)
+        )
+        citation["shared"] = bool(match and match["id"] not in own)
+    result["corpus_papers"] = len({chunk["paper_fk"] for chunk in retriever.chunks})
     return result
 
 
@@ -984,11 +1275,15 @@ async def api_ask(request: Request) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 @app.post("/api/demo/seed")
-def api_seed(run: bool = True) -> dict[str, Any]:
-    """Create the demo papers as real PDFs and optionally extract them."""
+def api_seed(request: Request, run: bool = True) -> dict[str, Any]:
+    """Create the demo papers as real PDFs under the signed-in account."""
+    user = current_user(request)
     created: list[dict[str, Any]] = []
     for item in DEMO_PAPERS:
-        existing = db.one("SELECT id FROM papers WHERE filename = ?", (item["filename"],))
+        existing = db.one(
+            "SELECT id FROM papers WHERE owner_fk = ? AND filename = ?",
+            (user["id"], item["filename"]),
+        )
         if existing:
             continue
         paper_id = _next_paper_id()
@@ -1003,23 +1298,27 @@ def api_seed(run: bool = True) -> dict[str, Any]:
             raise HTTPException(500, f"演示 PDF 生成失败：{exc}") from exc
 
         stats = paper.stats()
+        payload = target.read_bytes()
         paper_fk = db.execute(
             """
-            INSERT INTO papers (paper_key, paper_id, title, original_title, filename, pdf_path,
-                                pages, chars, n_tables, content_hash, source, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'demo', ?)
+            INSERT INTO papers (paper_key, paper_id, owner_fk, title, original_title, filename,
+                                pdf_path, pdf_blob, pages, chars, n_tables, content_hash,
+                                source, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'demo', ?)
             """,
             (
                 paper_key,
                 paper_id,
+                user["id"],
                 item["title"],
                 item["title"],
                 item["filename"],
                 str(target.relative_to(ROOT)).replace("\\", "/"),
+                sqlite3.Binary(payload),
                 int(stats["pages"]),
                 int(stats["chars"]),
                 int(stats["tables"]),
-                hashlib.sha256(target.read_bytes()).hexdigest(),
+                hashlib.sha256(payload).hexdigest(),
                 now(),
             ),
         )
@@ -1045,10 +1344,34 @@ def api_seed(run: bool = True) -> dict[str, Any]:
 # static front-end
 # --------------------------------------------------------------------------- #
 
+def _asset_version() -> str:
+    """Short hash of the CSS+JS bundle, used as a cache-busting query.
+
+    Without this the browser can keep a stale app.js next to a fresh
+    index.html; the old script then fails on elements that no longer exist
+    and every later event binding is silently skipped.
+    """
+    digest = hashlib.sha256()
+    for name in ("style.css", "app.js"):
+        path = STATIC_DIR / name
+        if path.exists():
+            digest.update(path.read_bytes())
+    return digest.hexdigest()[:12]
+
+
 @app.get("/")
 def index() -> HTMLResponse:
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
-    return HTMLResponse(html)
+    html = html.replace("__ASSET_V__", _asset_version())
+    # The shell itself must never be cached, or the new version is never seen.
+    return HTMLResponse(
+        html,
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 
 @app.exception_handler(HTTPException)

@@ -18,14 +18,33 @@ const S = {
   compareRows: [],      // all records available for comparison
   compareSel: new Set(),// selected record_id set
   settings: null,       // /api/settings/llm payload
+  user: null,           // 当前登录账号；null 表示未登录
+  sharedPapers: 0,      // 全库共享语料规模，用于问答页提示
 };
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
+/** 绑定事件，但元素不存在时只告警。
+ *
+ * 这个文件在顶层顺序绑定大量监听器。过去只要有一个 id 消失
+ * （例如 HTML 改版后 JS 仍是缓存的旧版），抛出的 TypeError 会中断脚本，
+ * 其后的全部绑定都不再执行——表现就是「按钮点了没反应」。
+ * 用它包一层，单个缺失不再连累其它功能。
+ */
+function on(id, event, handler, options) {
+  const node = $(id);
+  if (!node) {
+    console.warn(`[app] 元素 #${id} 不存在，已跳过 ${event} 绑定`);
+    return null;
+  }
+  node.addEventListener(event, handler, options);
+  return node;
+}
+
 async function api(path, options = {}) {
-  const response = await fetch(path, options);
+  const response = await fetch(path, { credentials: "same-origin", ...options });
   if (!response.ok) {
     let detail = `HTTP ${response.status}`;
     let payload = null;
@@ -40,6 +59,10 @@ async function api(path, options = {}) {
       error.payload = payload;
     }
     error.status = response.status;
+    // 会话过期：回到登录门，避免后续请求连环报错
+    if (response.status === 401 && !path.startsWith("/api/auth/")) {
+      handleSessionLost();
+    }
     throw error;
   }
   return response.status === 204 ? null : response.json();
@@ -100,6 +123,278 @@ window.addEventListener("resize", repositionOpenHelp);
 window.addEventListener("scroll", repositionOpenHelp, true);
 
 /* ------------------------------------------------------------------ */
+/* 账号：登录 / 注册 / 个人信息                                         */
+/* ------------------------------------------------------------------ */
+
+/* 会话由服务端 HttpOnly Cookie 维持，前端只保存展示用的账号信息。
+   个人信息和文献库都存在服务端，所以换设备登录同一账号看到的内容一致。 */
+
+let authMode = "login";
+
+function setAuthMode(mode) {
+  authMode = mode;
+  document.querySelectorAll(".auth-tab").forEach((tab) =>
+    tab.classList.toggle("active", tab.dataset.mode === mode));
+  $("authExtra").hidden = mode !== "register";
+  $("authSubmit").textContent = mode === "register" ? "注册并登录" : "登录";
+  $("authPassword").setAttribute(
+    "autocomplete", mode === "register" ? "new-password" : "current-password");
+  authError("");
+}
+
+function authError(message) {
+  const box = $("authError");
+  box.hidden = !message;
+  box.textContent = message || "";
+}
+
+function showAuthGate(mode) {
+  if (mode) setAuthMode(mode);
+  closeAccountPop();
+  $("authGate").hidden = false;
+  document.querySelector(".app").classList.add("locked");
+  $("authUsername").focus();
+}
+
+function hideAuthGate() {
+  $("authGate").hidden = true;
+  document.querySelector(".app").classList.remove("locked");
+}
+
+/** 关闭登录弹窗：未登录也能浏览界面，随时点右上角头像再登录。 */
+function dismissAuthGate() {
+  hideAuthGate();
+  authError("");
+  $("authPassword").value = "";
+}
+
+on("authClose", "click", dismissAuthGate);
+on("authGate", "click", (event) => {
+  if (event.target.id === "authGate") dismissAuthGate();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !$("authGate").hidden) dismissAuthGate();
+});
+
+/* ---- 右上角头像菜单 ---- */
+
+function closeAccountPop() {
+  $("accountPop").hidden = true;
+  $("avatarBtn").setAttribute("aria-expanded", "false");
+}
+
+function toggleAccountPop() {
+  const pop = $("accountPop");
+  const open = pop.hidden;
+  pop.hidden = !open;
+  $("avatarBtn").setAttribute("aria-expanded", String(open));
+}
+
+on("avatarBtn", "click", (event) => {
+  event.stopPropagation();
+  toggleAccountPop();
+});
+
+// 点菜单外部收起；菜单内部的点击不冒泡到这里
+document.addEventListener("click", (event) => {
+  if (!$("accountMenu").contains(event.target)) closeAccountPop();
+});
+
+on("popLogin", "click", () => showAuthGate("login"));
+on("popRegister", "click", () => showAuthGate("register"));
+on("popProfile", "click", () => { closeAccountPop(); openProfile(); });
+
+/** 会话失效：清空内存数据并回到登录弹窗，防止显示上一个账号的残留。 */
+function handleSessionLost() {
+  if (!S.user) return;
+  clearSessionState();
+  renderAccountCard();
+  showAuthGate("login");
+  toast("登录已过期，请重新登录", "warn");
+}
+
+/** 退出 / 会话失效共用的内存清理。 */
+function clearSessionState() {
+  S.user = null;
+  S.papers = [];
+  S.paper = null;
+  S.picked.clear();
+  S.pageCache.clear();
+  S.pollers.forEach((timer) => clearInterval(timer));
+  S.pollers.clear();
+}
+
+on("authTabs", "click", (event) => {
+  const tab = event.target.closest(".auth-tab");
+  if (tab) setAuthMode(tab.dataset.mode);
+});
+
+on("authForm", "submit", async (event) => {
+  event.preventDefault();
+  const username = $("authUsername").value.trim();
+  const password = $("authPassword").value;
+  if (!username || !password) { authError("请填写用户名和密码"); return; }
+
+  const body = { username, password };
+  if (authMode === "register") {
+    Object.assign(body, {
+      display_name: $("authDisplayName").value.trim(),
+      email: $("authEmail").value.trim(),
+      institution: $("authInstitution").value.trim(),
+      research_area: $("authResearchArea").value.trim(),
+    });
+  }
+
+  await withBusy($("authSubmit"), authMode === "register" ? "注册中…" : "登录中…", async () => {
+    authError("");
+    try {
+      const result = await api(`/api/auth/${authMode}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      S.user = result.user;
+      $("authPassword").value = "";
+      hideAuthGate();
+      closeAccountPop();
+      renderAccountCard();
+      if (result.adopted_papers) {
+        toast(`欢迎，${S.user.display_name}！已将 ${result.adopted_papers} 篇既有论文归入你的账号`);
+      } else {
+        toast(`欢迎，${S.user.display_name}`);
+      }
+      await bootData();
+    } catch (error) {
+      authError(error.message);
+    }
+  });
+});
+
+function renderAccountCard() {
+  const signedIn = !!S.user;
+  const name = signedIn ? S.user.display_name : "";
+  const letter = signedIn ? (name || "?").trim().charAt(0).toUpperCase() : "?";
+
+  // 容错取值：缺任何一个节点都不该让整次渲染抛错
+  const set = (id, text) => { const n = $(id); if (n) n.textContent = text; };
+  set("accountAvatar", letter);
+  set("popAvatar", letter);
+
+  const btn = $("avatarBtn");
+  if (btn) {
+    btn.classList.toggle("anon", !signedIn);
+    btn.title = signedIn ? `${name} · 账号菜单` : "登录 / 注册";
+  }
+
+  const anon = $("accountPopAnon");
+  const user = $("accountPopUser");
+  if (anon) anon.hidden = signedIn;
+  if (user) user.hidden = !signedIn;
+
+  if (signedIn) {
+    set("accountName", name);
+    set("accountMeta", S.user.institution || S.user.research_area || `@${S.user.username}`);
+  }
+}
+
+/* ---- 个人信息弹窗 ---- */
+
+function profileResult(message, kind) {
+  const box = $("profileResult");
+  box.hidden = !message;
+  box.className = `setting-result ${kind || ""}`;
+  box.textContent = message || "";
+}
+
+async function openProfile() {
+  if (!S.user) { showAuthGate(); return; }
+  profileResult("");
+  $("profileOldPwd").value = "";
+  $("profileNewPwd").value = "";
+  $("profilePwdBlock").open = false;
+
+  try {
+    const me = await api("/api/auth/me");
+    if (me.user) S.user = me.user;
+    const stats = me.stats || {};
+    $("profileStats").innerHTML = `
+      <div><b>${esc(S.user.username)}</b><span>账号</span></div>
+      <div><b>${stats.own_papers ?? 0}</b><span>我的论文</span></div>
+      <div><b>${stats.own_records ?? 0}</b><span>我的记录</span></div>
+      <div><b>${stats.all_papers ?? 0}</b><span>共享语料</span></div>`;
+  } catch (_) { /* 统计失败不阻塞编辑 */ }
+
+  $("profileDisplayName").value = S.user.display_name || "";
+  $("profileEmail").value = S.user.email || "";
+  $("profileInstitution").value = S.user.institution || "";
+  $("profileResearchArea").value = S.user.research_area || "";
+  $("profileBio").value = S.user.bio || "";
+  $("profileMask").hidden = false;
+}
+
+function closeProfile() { $("profileMask").hidden = true; }
+
+on("profileClose", "click", closeProfile);
+on("profileCancel", "click", closeProfile);
+on("profileMask", "click", (event) => {
+  if (event.target.id === "profileMask") closeProfile();
+});
+
+on("profileSave", "click", () =>
+  withBusy($("profileSave"), "保存中…", async () => {
+    try {
+      const result = await api("/api/auth/profile", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          display_name: $("profileDisplayName").value,
+          email: $("profileEmail").value,
+          institution: $("profileInstitution").value,
+          research_area: $("profileResearchArea").value,
+          bio: $("profileBio").value,
+        }),
+      });
+      S.user = result.user;
+      renderAccountCard();
+      profileResult("已保存，其他设备登录同一账号即可看到最新信息", "ok");
+      toast("个人信息已更新");
+    } catch (error) { profileResult(error.message, "err"); }
+  }));
+
+on("profilePwdSave", "click", () =>
+  withBusy($("profilePwdSave"), "更新中…", async () => {
+    try {
+      await api("/api/auth/password", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          old_password: $("profileOldPwd").value,
+          new_password: $("profileNewPwd").value,
+        }),
+      });
+      $("profileOldPwd").value = "";
+      $("profileNewPwd").value = "";
+      profileResult("密码已更新；其他设备需要重新登录", "ok");
+      toast("密码已更新");
+    } catch (error) { profileResult(error.message, "err"); }
+  }));
+
+async function doLogout() {
+  try { await api("/api/auth/logout", { method: "POST" }); } catch (_) { }
+  clearSessionState();
+  closeProfile();
+  closeAccountPop();
+  renderLibrary();
+  renderAccountCard();
+  renderAskScope();
+  showAuthGate("login");
+  toast("已退出登录");
+}
+
+on("profileLogout", "click", doLogout);
+on("popLogout", "click", doLogout);
+
+/* ------------------------------------------------------------------ */
 /* theme                                                               */
 /* ------------------------------------------------------------------ */
 
@@ -113,7 +408,7 @@ function applyTheme(name) {
   try { localStorage.setItem(THEME_KEY, name); } catch (_) { }
 }
 
-$("themeToggle").addEventListener("click", () => {
+on("themeToggle", "click", () => {
   applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
 });
 
@@ -163,7 +458,7 @@ function showView(name) {
   }
 }
 
-$("nav").addEventListener("click", (event) => {
+on("nav", "click", (event) => {
   const button = event.target.closest(".nav-item");
   if (button) showView(button.dataset.view);
 });
@@ -176,6 +471,8 @@ async function loadStatus() {
   S.status = await api("/api/status");
   S.fields = S.status.fields;
   S.modes = S.status.modes || [];
+  S.sharedPapers = S.status.shared_papers || 0;
+  if (S.status.user) S.user = S.status.user;
 
   const llm = S.status.llm;
   $("engineDot").className = `dot ${llm.available ? "on" : "off"}`;
@@ -246,7 +543,7 @@ function syncBulkHint() {
   if (link) link.addEventListener("click", (e) => { e.preventDefault(); openSettings(); });
 }
 
-$("bulkMode").addEventListener("change", syncBulkHint);
+on("bulkMode", "change", syncBulkHint);
 
 /* ------------------------------------------------------------------ */
 /* hover brief (简易版总结)                                            */
@@ -335,20 +632,21 @@ function groupOf(paper) {
   return "pending";
 }
 
-const STAGE_SEQUENCE = ["解析 PDF", "抽取", "后处理", "完成"];
+const STAGE_SEQUENCE = ["解析 PDF", "抽取", "后处理", "生成总结", "完成"];
 
-/** 把后端阶段文字映射到固定的 4 步，便于显示“第几步”。 */
+/** 把后端阶段文字映射到固定的 5 步，便于显示“第几步”。 */
 function stageStep(stage) {
   if (!stage) return 0;
   if (stage.includes("排队")) return 0;
   if (stage.includes("解析")) return 1;
   if (stage.includes("LLM") || stage.includes("规则") || stage.includes("Agent")) return 2;
   if (stage.includes("后处理") || stage.includes("证据")) return 3;
-  if (stage.includes("完成")) return 4;
+  if (stage.includes("总结")) return 4;
+  if (stage.includes("完成")) return 5;
   return 1;
 }
 
-/** 渲染 4 步进度条的文字部分，已完成的步骤用对勾替代序号。 */
+/** 渲染 5 步进度条的文字部分，已完成的步骤用对勾替代序号。 */
 function stepsHtml(step) {
   return STAGE_SEQUENCE.map((label, index) => {
     const position = index + 1;
@@ -411,7 +709,9 @@ function paperCardHtml(paper, group) {
       <button class="btn sm" data-act="open" ${paper.n_records ? "" : "disabled"}>结果</button>
     </div>
     <div class="paper-actions second">
-      <button class="btn sm" data-act="summary" title="生成/查看这篇文献的内容总结">内容总结</button>
+      <button class="btn sm" data-act="summary"
+        title="${paper.summary ? "查看抽取时自动生成的内容总结" : "该论文还没有总结：运行抽取会自动生成，也可点此立即生成"}"
+        >内容总结${paper.summary ? "" : "（未生成）"}</button>
       <button class="btn sm" data-act="rename" title="自定义显示名称并添加备注">命名/备注</button>
       <button class="btn sm danger" data-act="del">删除</button>
     </div>
@@ -505,7 +805,7 @@ function syncBulkBar() {
   btn.textContent = pending ? `抽取全部待抽取 (${pending})` : "抽取全部待抽取";
 }
 
-$("bulkSelectAll").addEventListener("change", (event) => {
+on("bulkSelectAll", "change", (event) => {
   S.picked.clear();
   if (event.target.checked) selectablePapers().forEach((p) => S.picked.add(p.id));
   renderLibrary();
@@ -543,16 +843,16 @@ async function runBatch(ids, mode) {
   } catch (error) { toast(error.message, "err"); }
 }
 
-$("bulkRun").addEventListener("click", () =>
+on("bulkRun", "click", () =>
   runBatch([...S.picked], $("bulkMode").value));
 
-$("bulkRunPending").addEventListener("click", () => {
+on("bulkRunPending", "click", () => {
   const ids = S.papers.filter((p) => groupOf(p) === "pending").map((p) => p.id);
   if (!ids.length) { toast("没有待抽取的论文", "warn"); return; }
   runBatch(ids, $("bulkMode").value);
 });
 
-$("bulkDelete").addEventListener("click", async () => {
+on("bulkDelete", "click", async () => {
   const ids = [...S.picked];
   if (!ids.length) return;
   if (!confirm(`删除选中的 ${ids.length} 篇论文及其全部抽取记录？此操作不可撤销。`)) return;
@@ -661,7 +961,7 @@ async function patchPaper(paperFk, body) {
   return updated;
 }
 
-$("renameSave").addEventListener("click", () =>
+on("renameSave", "click", () =>
   withBusy($("renameSave"), "保存中…", async () => {
     if (!renameTarget) return;
     try {
@@ -680,7 +980,7 @@ $("renameSave").addEventListener("click", () =>
     } catch (error) { toast(error.message, "err"); }
   }));
 
-$("renameReset").addEventListener("click", async () => {
+on("renameReset", "click", async () => {
   if (!renameTarget) return;
   try {
     const updated = await patchPaper(renameTarget, { reset_title: true });
@@ -692,9 +992,9 @@ $("renameReset").addEventListener("click", async () => {
   } catch (error) { toast(error.message, "err"); }
 });
 
-$("renameCancel").addEventListener("click", closeRename);
-$("renameClose").addEventListener("click", closeRename);
-$("renameMask").addEventListener("click", (event) => {
+on("renameCancel", "click", closeRename);
+on("renameClose", "click", closeRename);
+on("renameMask", "click", (event) => {
   if (event.target.id === "renameMask") closeRename();
 });
 
@@ -749,13 +1049,13 @@ function closeSummary() {
   summaryTarget = null;
 }
 
-$("summaryRefresh").addEventListener("click", () =>
+on("summaryRefresh", "click", () =>
   withBusy($("summaryRefresh"), "生成中…", async () => {
     if (summaryTarget) await openSummary(summaryTarget, true);
   }));
-$("summaryDone").addEventListener("click", closeSummary);
-$("summaryClose").addEventListener("click", closeSummary);
-$("summaryMask").addEventListener("click", (event) => {
+on("summaryDone", "click", closeSummary);
+on("summaryClose", "click", closeSummary);
+on("summaryMask", "click", (event) => {
   if (event.target.id === "summaryMask") closeSummary();
 });
 
@@ -920,7 +1220,16 @@ async function uploadFiles(files) {
   await loadStatus();
 }
 
-$("fileInput").addEventListener("change", (event) => {
+/** 需要登录的操作统一走这里：未登录时提示并弹出登录框。 */
+function requireLogin(action = "使用该功能") {
+  if (S.user) return true;
+  toast(`请先登录后再${action}`, "warn");
+  showAuthGate("login");
+  return false;
+}
+
+on("fileInput", "change", (event) => {
+  if (!requireLogin("上传论文")) { event.target.value = ""; return; }
   if (event.target.files.length) uploadFiles([...event.target.files]);
   event.target.value = "";
 });
@@ -931,11 +1240,13 @@ const zone = $("uploadZone");
 ["dragleave", "drop"].forEach((type) =>
   zone.addEventListener(type, (e) => { e.preventDefault(); zone.classList.remove("hot"); }));
 zone.addEventListener("drop", (event) => {
+  if (!requireLogin("上传论文")) return;
   const files = [...event.dataTransfer.files].filter((f) => f.name.toLowerCase().endsWith(".pdf"));
   if (files.length) uploadFiles(files); else toast("请拖入 PDF 文件", "warn");
 });
 
-$("seedBtn").addEventListener("click", async () => {
+on("seedBtn", "click", async () => {
+  if (!requireLogin("载入演示数据")) return;
   try {
     await api("/api/demo/seed", { method: "POST" });
     toast("演示数据已载入，抽取进度见“正在抽取”");
@@ -1031,7 +1342,7 @@ function renderProfiles() {
     </div>`).join("");
 }
 
-$("profileList").addEventListener("click", async (event) => {
+on("profileList", "click", async (event) => {
   const button = event.target.closest("[data-profile-act]");
   const item = event.target.closest("[data-profile]");
   if (!button || !item) return;
@@ -1104,21 +1415,21 @@ async function openSettings() {
 
 function closeSettings() { $("settingsMask").hidden = true; }
 
-$("openSettings").addEventListener("click", openSettings);
-$("settingsClose").addEventListener("click", closeSettings);
-$("settingsMask").addEventListener("click", (event) => {
+on("openSettings", "click", openSettings);
+on("settingsClose", "click", closeSettings);
+on("settingsMask", "click", (event) => {
   if (event.target.id === "settingsMask") closeSettings();
 });
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !$("settingsMask").hidden) closeSettings();
 });
 
-$("settingProvider").addEventListener("change", (event) => {
+on("settingProvider", "change", (event) => {
   clearSettingResult();
   applyPreset(event.target.value);
 });
 
-$("settingKeyPeek").addEventListener("click", () => {
+on("settingKeyPeek", "click", () => {
   const input = $("settingKey");
   input.type = input.type === "password" ? "text" : "password";
 });
@@ -1141,7 +1452,7 @@ async function withBusy(button, label, task) {
   finally { button.disabled = false; button.textContent = original; }
 }
 
-$("settingTest").addEventListener("click", () =>
+on("settingTest", "click", () =>
   withBusy($("settingTest"), "连接中…", async () => {
     clearSettingResult();
     try {
@@ -1154,7 +1465,7 @@ $("settingTest").addEventListener("click", () =>
     } catch (error) { settingResult(error.message, "err"); }
   }));
 
-$("settingSave").addEventListener("click", () =>
+on("settingSave", "click", () =>
   withBusy($("settingSave"), "测试并保存中…", async () => {
     clearSettingResult();
     try {
@@ -1177,7 +1488,7 @@ $("settingSave").addEventListener("click", () =>
     } catch (error) { settingResult(error.message, "err"); }
   }));
 
-$("settingClear").addEventListener("click", async () => {
+on("settingClear", "click", async () => {
   if (!confirm("清除已保存的密钥？之后抽取会改用离线关键词规则。")) return;
   try {
     const result = await api("/api/settings/llm", { method: "DELETE" });
@@ -1202,7 +1513,7 @@ const GUIDE_KEY = "cheminfo-guide-hidden";
   if (hidden === "1") $("guideBar").hidden = true;
 })();
 
-$("guideHide").addEventListener("click", () => {
+on("guideHide", "click", () => {
   $("guideBar").hidden = true;
   try { localStorage.setItem(GUIDE_KEY, "1"); } catch (_) { }
 });
@@ -1269,7 +1580,7 @@ function syncSwitchOverflow(total) {
   if (active) active.scrollIntoView({ inline: "nearest", block: "nearest" });
 }
 
-$("switchMore").addEventListener("click", () => {
+on("switchMore", "click", () => {
   const box = $("paperSwitch");
   box.classList.toggle("collapsed");
   syncSwitchOverflow(box.querySelectorAll(".switch-card").length);
@@ -1282,7 +1593,7 @@ window.addEventListener("resize", () => {
   }
 });
 
-$("paperSwitch").addEventListener("click", async (event) => {
+on("paperSwitch", "click", async (event) => {
   const card = event.target.closest(".switch-card");
   if (!card) return;
   hideBrief();
@@ -1297,10 +1608,15 @@ bindBriefHover($("paperSwitch"));
 function renderAskScope() {
   const scope = $("askScope");
   const current = scope.value;
-  scope.innerHTML = '<option value="">全部论文</option>' + S.papers
+  const shared = S.sharedPapers
+    ? `全部论文（共享语料 ${S.sharedPapers} 篇）`
+    : "全部论文（共享语料）";
+  scope.innerHTML = `<option value="">${esc(shared)}</option>` + S.papers
     .map((p) => `<option value="${p.id}">${esc(p.paper_key)} · ${esc(p.title)}</option>`)
     .join("");
   if (current && S.papers.some((p) => String(p.id) === current)) scope.value = current;
+  const option = scope.selectedOptions[0];
+  $("askScopeLabel").textContent = option ? option.textContent : shared;
 }
 
 async function openPaper(paperFk) {
@@ -1345,7 +1661,7 @@ function renderRecordTabs() {
              data-i="${i}">样品 ${r.record_index}</button>`).join("");
 }
 
-$("recordTabs").addEventListener("click", (event) => {
+on("recordTabs", "click", (event) => {
   const tab = event.target.closest(".record-tab");
   if (!tab) return;
   if (S.dirty.size && !confirm("当前记录有未保存的修改，切换会丢失。继续？")) return;
@@ -1386,7 +1702,7 @@ function renderFields() {
   }).join("");
 }
 
-$("fieldList").addEventListener("click", (event) => {
+on("fieldList", "click", (event) => {
   const pill = event.target.closest(".page-pill");
   const row = event.target.closest(".field-row");
   if (pill) {
@@ -1397,7 +1713,7 @@ $("fieldList").addEventListener("click", (event) => {
   }
 });
 
-$("fieldList").addEventListener("input", (event) => {
+on("fieldList", "input", (event) => {
   const input = event.target.closest(".field-input");
   if (!input) return;
   const record = currentRecord();
@@ -1494,10 +1810,10 @@ function highlightQuote(text, quote) {
   return esc(text);
 }
 
-$("pagePrev").addEventListener("click", () => showPage(S.page - 1));
-$("pageNext").addEventListener("click", () => showPage(S.page + 1));
+on("pagePrev", "click", () => showPage(S.page - 1));
+on("pageNext", "click", () => showPage(S.page + 1));
 
-$("saveRecord").addEventListener("click", async () => {
+on("saveRecord", "click", async () => {
   const record = currentRecord();
   if (!record) return;
   const fields = {};
@@ -1519,9 +1835,9 @@ $("saveRecord").addEventListener("click", async () => {
   } catch (error) { toast(error.message, "err"); }
 });
 
-$("exportJsonl").addEventListener("click", () =>
+on("exportJsonl", "click", () =>
   window.open(S.paper ? `/api/export?fmt=jsonl&paper_fk=${S.paper.id}` : "/api/export?fmt=jsonl"));
-$("exportCsv").addEventListener("click", () =>
+on("exportCsv", "click", () =>
   window.open(S.paper ? `/api/export?fmt=csv&paper_fk=${S.paper.id}` : "/api/export?fmt=csv"));
 
 /* ------------------------------------------------------------------ */
@@ -1573,15 +1889,15 @@ async function loadHistory() {
   }
 }
 
-$("historyToggle").addEventListener("click", async () => {
+on("historyToggle", "click", async () => {
   const box = $("historyBox");
   box.hidden = !box.hidden;
   if (!box.hidden) await loadHistory();
 });
 
-$("historyClose").addEventListener("click", () => { $("historyBox").hidden = true; });
+on("historyClose", "click", () => { $("historyBox").hidden = true; });
 
-$("historyList").addEventListener("click", async (event) => {
+on("historyList", "click", async (event) => {
   const button = event.target.closest(".history-revert");
   if (!button) return;
   const record = currentRecord();
@@ -1659,7 +1975,7 @@ function renderPickList() {
     </div>`).join("");
 }
 
-$("pickList").addEventListener("change", (event) => {
+on("pickList", "change", (event) => {
   const item = event.target.closest(".pick-item");
   if (!item) return;
   const rid = item.dataset.rid;
@@ -1668,15 +1984,15 @@ $("pickList").addEventListener("change", (event) => {
   renderCompare();
 });
 
-$("pickAll").addEventListener("click", () => {
+on("pickAll", "click", () => {
   S.compareRows.forEach((r) => S.compareSel.add(r.record_id));
   renderPickList(); renderCompare();
 });
-$("pickNone").addEventListener("click", () => {
+on("pickNone", "click", () => {
   S.compareSel.clear();
   renderPickList(); renderCompare();
 });
-$("diffOnly").addEventListener("change", renderCompare);
+on("diffOnly", "change", renderCompare);
 
 function selectedRecords() {
   return S.compareRows.filter((r) => S.compareSel.has(r.record_id));
@@ -1741,7 +2057,7 @@ function renderCompare() {
     `<table class="compare-table">${header}<tbody>${bodyRows}</tbody></table>`;
 }
 
-$("exportCompare").addEventListener("click", () => {
+on("exportCompare", "click", () => {
   const picked = selectedRecords();
   if (picked.length < 2) { toast("请先勾选至少 2 条记录", "warn"); return; }
 
@@ -1815,9 +2131,9 @@ async function runSearch() {
     : `命中 ${data.total} 条记录`;
 }
 
-$("searchBtn").addEventListener("click", runSearch);
-$("searchQ").addEventListener("keydown", (e) => { if (e.key === "Enter") runSearch(); });
-$("searchTable").addEventListener("click", async (event) => {
+on("searchBtn", "click", runSearch);
+on("searchQ", "keydown", (e) => { if (e.key === "Enter") runSearch(); });
+on("searchTable", "click", async (event) => {
   const cell = event.target.closest("[data-open]");
   if (!cell) return;
   showView("review");
@@ -1845,7 +2161,7 @@ async function loadJobs() {
     : '<tr><td colspan="8"><div class="placeholder">还没有任务记录。</div></td></tr>';
 }
 
-$("jobTable").addEventListener("click", async (event) => {
+on("jobTable", "click", async (event) => {
   const cell = event.target.closest("[data-open]");
   if (!cell) return;
   showView("review");
@@ -1858,19 +2174,22 @@ $("jobTable").addEventListener("click", async (event) => {
 
 /* AI 助手已独立为首页视图，范围选择与对话区都在 #view-ask 内 */
 
-$("askScope").addEventListener("change", (event) => {
+on("askScope", "change", (event) => {
   const option = event.target.selectedOptions[0];
   $("askScopeLabel").textContent = option ? option.textContent : "全部论文";
 });
 
-$("askBody").addEventListener("click", async (event) => {
+on("askBody", "click", async (event) => {
   const chip = event.target.closest(".chip");
   if (chip) { $("askInput").value = chip.textContent; $("askForm").requestSubmit(); return; }
   const cite = event.target.closest(".cite");
   if (!cite) return;
   const paperFk = Number(cite.dataset.paper);
   const page = Number(cite.dataset.page);
-  if (!paperFk) { toast("该引文对应的论文已不在库中", "warn"); return; }
+  if (!paperFk) {
+    toast("这条引文来自其他用户共享的论文，不在你的文献库中，无法跳转原文", "warn");
+    return;
+  }
   showView("review");
   // openPaper() navigates to the record's first evidence page, so the jump to
   // the cited page must happen after it resolves.
@@ -1878,10 +2197,11 @@ $("askBody").addEventListener("click", async (event) => {
   await showPage(page, cite.dataset.quote);
 });
 
-$("askForm").addEventListener("submit", async (event) => {
+on("askForm", "submit", async (event) => {
   event.preventDefault();
   const question = $("askInput").value.trim();
   if (!question) return;
+  if (!requireLogin("提问")) return;
   $("askInput").value = "";
 
   const body = $("askBody");
@@ -1899,15 +2219,25 @@ $("askForm").addEventListener("submit", async (event) => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ question, paper_fk: scope ? Number(scope) : null }),
     });
-    const citations = (result.citations || []).map((c) => `
-      <div class="cite" data-paper="${paperFkOf(c.paper_key)}" data-page="${c.page}"
+    // 来自他人论文的引文不在本账号文献库里，标注出来且不提供跳转
+    const citations = (result.citations || []).map((c) => {
+      const own = paperFkOf(c.paper_key);
+      const shared = c.shared || !own;
+      return `
+      <div class="cite ${shared ? "shared" : ""}" data-paper="${own}" data-page="${c.page}"
            data-quote="${esc(c.quote)}">
-        <b>${esc(c.paper_key)} · p.${c.page}</b><br/>${esc(c.quote)}
-      </div>`).join("");
+        <b>${esc(c.paper_key)} · p.${c.page}</b>
+        ${shared ? '<span class="cite-tag">共享语料</span>' : ""}
+        <br/>${esc(c.quote)}
+      </div>`;
+    }).join("");
+    const corpus = result.corpus_papers
+      ? ` · 本次检索覆盖 ${result.corpus_papers} 篇论文`
+      : "";
     pending.innerHTML = `
       <p>${answerHtml(result.answer)}</p>
       ${citations ? `<div class="cite-list">${citations}</div>` : ""}
-      <p class="muted">回答引擎：${esc(result.engine === "llm" ? "LLM + 检索" : "检索（抽取式）")} · 点击引文跳转原文</p>`;
+      <p class="muted">回答引擎：${esc(result.engine === "llm" ? "LLM + 检索" : "检索（抽取式）")}${corpus} · 点击自己库中的引文可跳转原文</p>`;
   } catch (error) {
     pending.innerHTML = `<p>出错了：${esc(error.message)}</p>`;
   }
@@ -1928,17 +2258,37 @@ function answerHtml(text) {
 
 /* ------------------------------------------------------------------ */
 
+/** 登录后加载该账号的数据。 */
+async function bootData() {
+  await loadStatus();
+  await loadPapers();
+  renderAccountCard();
+  // AI 助手是首页；提取结果视图仍预载一篇，切过去即有内容
+  if (S.papers.length) {
+    const withRecords = S.papers.find((p) => p.n_records > 0);
+    if (withRecords) await openPaper(withRecords.id);
+  }
+  showView("ask");
+}
+
 (async function boot() {
   try {
-    await loadStatus();
-    await loadPapers();
-    // AI 助手是首页；提取结果视图仍预载一篇，切过去即有内容
-    if (S.papers.length) {
-      const withRecords = S.papers.find((p) => p.n_records > 0);
-      if (withRecords) await openPaper(withRecords.id);
+    // Cookie 仍有效就直接进入，否则弹登录框（可关掉，之后点右上角头像再登录）
+    const me = await api("/api/auth/me");
+    renderAccountCard();
+    if (me.user) {
+      S.user = me.user;
+      hideAuthGate();
+      await bootData();
+    } else {
+      await loadStatus();   // 引擎状态与共享语料规模不需要登录
+      renderAccountCard();
+      showView("ask");
+      showAuthGate("login");
     }
-    showView("ask");
   } catch (error) {
-    toast(`初始化失败：${error.message}`, "err");
+    renderAccountCard();
+    showAuthGate();
+    authError(`初始化失败：${error.message}`);
   }
 })();

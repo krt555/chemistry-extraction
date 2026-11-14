@@ -52,6 +52,31 @@ def extract_json(text: str) -> dict[str, Any] | None:
     return None
 
 
+def _max_tokens_limit(body: str) -> int | None:
+    """Pull the accepted upper bound out of a provider's 400 response.
+
+    Providers disagree on how large ``max_tokens`` may be and answer with
+    messages like ``Range of max_tokens should be [1, 32768]``.  Reading the
+    limit back lets one retry succeed instead of degrading the whole job to
+    the rule engine.
+    """
+    patterns = (
+        r"max_tokens\s+should\s+be\s*\[\s*\d+\s*,\s*(\d+)\s*\]",
+        r"max_tokens.{0,40}?(?:less than or equal to|at most|maximum of|<=)\s*(\d+)",
+        r"max_tokens.{0,40}?support.{0,20}?(\d+)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, body, re.I)
+        if match:
+            try:
+                limit = int(match.group(1))
+            except ValueError:
+                continue
+            if limit > 0:
+                return limit
+    return None
+
+
 class OpenAICompatibleLLM:
     def __init__(self, config: LLMConfig):
         self.config = config
@@ -76,15 +101,37 @@ class OpenAICompatibleLLM:
         start = time.time()
         last_error: Exception | None = None
         data: dict[str, Any] | None = None
-        for attempt in range(self.config.max_retries):
+        # 参数自愈（缩小 max_tokens、去掉 response_format）属于修正请求，
+        # 不应占用为网络抖动准备的重试额度，各自最多发生一次。
+        budget = self.config.max_retries
+        attempt = 0
+        fixed_max_tokens = False
+        fixed_response_format = False
+        while attempt < budget:
             try:
                 data = self._post(payload)
                 break
             except urllib.error.HTTPError as exc:
                 body = _read_error(exc)
-                if exc.code == 400 and "response_format" in payload:
+                # 服务商拒绝过大的 max_tokens：按报错里给出的上限重试，
+                # 而不是让整次抽取退回规则引擎。
+                if exc.code == 400 and not fixed_max_tokens:
+                    limit = _max_tokens_limit(body)
+                    if limit and payload.get("max_tokens", 0) > limit:
+                        payload["max_tokens"] = limit
+                        fixed_max_tokens = True
+                        budget += 1
+                        last_error = LLMError(
+                            f"HTTP 400 (retrying with max_tokens={limit}): {body}"
+                        )
+                        attempt += 1
+                        continue
+                if exc.code == 400 and "response_format" in payload and not fixed_response_format:
                     payload.pop("response_format", None)
+                    fixed_response_format = True
+                    budget += 1
                     last_error = LLMError(f"HTTP 400 (retrying without response_format): {body}")
+                    attempt += 1
                     continue
                 if exc.code in {401, 403}:
                     raise LLMError(
@@ -96,7 +143,8 @@ class OpenAICompatibleLLM:
                     raise last_error from exc
             except (urllib.error.URLError, TimeoutError, OSError) as exc:
                 last_error = LLMError(f"network error: {exc}")
-            if attempt + 1 < self.config.max_retries:
+            attempt += 1
+            if attempt < budget:
                 time.sleep(min(2**attempt, 8))
         if data is None:
             raise LLMError(f"LLM request failed after retries: {last_error}")

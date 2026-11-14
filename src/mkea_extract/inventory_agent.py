@@ -102,7 +102,8 @@ def discover_inventory(
 
     for step in range(1, max_steps + 1):
         try:
-            parsed, response = llm.complete_json(messages, max_tokens=32768)
+            # 同上：上限交给 LLMConfig，不在调用点写死
+            parsed, response = llm.complete_json(messages)
         except LLMError as exc:
             raise InventoryError(f"inventory LLM failed: {exc}") from exc
         model = response.model

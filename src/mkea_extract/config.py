@@ -112,7 +112,9 @@ class LLMConfig:
     base_url: str = DEFAULT_BASE_URL
     model: str = DEFAULT_MODEL
     timeout_s: float = 300.0
-    max_tokens: int = 65536
+    # 32768 是主流服务商（qwen-plus、deepseek 等）普遍接受的上限；
+    # 之前默认 65536 会被这些服务直接拒成 HTTP 400，导致整次调用回退规则引擎。
+    max_tokens: int = 32768
     temperature: float = 0.0
     max_retries: int = 3
     session_id: str = ""
@@ -144,7 +146,7 @@ class LLMConfig:
             base_url=base_url or os.environ.get("MKEA_LLM_BASE_URL") or DEFAULT_BASE_URL,
             model=model or os.environ.get("MKEA_LLM_MODEL") or DEFAULT_MODEL,
             timeout_s=_env_float("MKEA_LLM_TIMEOUT", 300.0),
-            max_tokens=_env_int("MKEA_LLM_MAX_TOKENS", 65536),
+            max_tokens=_env_int("MKEA_LLM_MAX_TOKENS", 32768),
             temperature=_env_float("MKEA_LLM_TEMPERATURE", 0.0),
             max_retries=_env_int("MKEA_LLM_MAX_RETRIES", 3),
         )
