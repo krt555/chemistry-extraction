@@ -27,7 +27,7 @@ from .heuristic import extract_records_heuristic  # noqa: E402
 
 PAPERS_DIR = _ROOT / "papers"
 _LOADER_LOCK = threading.Lock()
-_LOADER = PDFLoader(use_cache=True, ocr=False)
+_LOADER = PDFLoader(use_cache=True, ocr=True)
 
 # Single source of truth for the mode picker: the UI renders these labels and
 # descriptions, and run_extraction() below dispatches on the same ids.

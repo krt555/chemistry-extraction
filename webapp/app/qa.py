@@ -46,8 +46,11 @@ SYNONYMS = {
     "溶剂": ["solvent", "ethanol", "etoh", "water"],
     "合成": ["synthesis", "synthesised", "synthesized", "preparation", "prepared"],
     "制备": ["preparation", "prepared", "synthesis"],
+    "反应": ["reaction", "synthesis", "reacted", "prepared", "preparation", "product"],
+    "总结": ["synthesis", "preparation", "prepared", "experimental", "procedure"],
     "步骤": ["typical", "procedure", "experimental"],
     "条件": ["conditions", "typical", "experimental"],
+    "主要": ["main", "major", "primary"],
     "作用": ["role", "effect", "essential", "promote"],
     "产率": ["yield"],
     "样品": ["sample", "product", "material"],
@@ -58,6 +61,9 @@ INTENT_HINTS = [
     (r"怎么|如何|步骤|流程|制备|合成方法", ["typical", "experimental", "procedure", "prepared"]),
     (r"多少|数值|是多大|几", ["was", "reached", "about"]),
     (r"作用|为什么|影响", ["essential", "promote", "effect", "control", "found"]),
+    (r"总结|概括|概述|综述|整体|主要|overview|summar", [
+        "synthesis", "preparation", "experimental", "procedure", "reaction", "product",
+    ]),
 ]
 
 
@@ -109,6 +115,9 @@ class Retriever:
         query = expand_query(question)
         if not query or not self.chunks:
             return []
+        is_overview = bool(re.search(r"总结|概括|概述|综述|整体|主要|overview|summar", question, re.I))
+        if is_overview:
+            top_k = max(top_k, min(8, len(self.chunks)))
         k1, b = 1.5, 0.75
         scored: list[tuple[float, int]] = []
         for index, freq in enumerate(self.freqs):
@@ -125,6 +134,24 @@ class Retriever:
             if score > 0:
                 scored.append((score, index))
         scored.sort(reverse=True)
+        if is_overview:
+            selected: list[tuple[float, int]] = []
+            selected_indexes: set[int] = set()
+            seen_papers: set[int] = set()
+            for item in scored:
+                paper_fk = int(self.chunks[item[1]]["paper_fk"])
+                if paper_fk not in seen_papers:
+                    selected.append(item)
+                    selected_indexes.add(item[1])
+                    seen_papers.add(paper_fk)
+                    if len(selected) == top_k:
+                        break
+            if len(selected) < top_k:
+                selected.extend(
+                    item for item in scored
+                    if item[1] not in selected_indexes
+                )
+            scored = selected
         results = []
         for score, index in scored[:top_k]:
             chunk = dict(self.chunks[index])

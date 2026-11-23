@@ -36,8 +36,7 @@
         </label>
         <label class="auth-row">
           <span>密码</span>
-          <input class="input" id="authPassword" type="password" autocomplete="current-password"
-            placeholder="至少 6 位" />
+          <input class="input" id="authPassword" type="password" autocomplete="current-password" placeholder="至少 6 位" />
         </label>
 
         <!-- 注册时才出现的个人信息，可留空，之后在「个人信息」里补 -->
@@ -80,43 +79,77 @@
         </div>
       </div>
 
+      <button class="sidebar-toggle" id="sidebarToggle" type="button" aria-label="展开侧边栏" aria-expanded="false"
+        title="展开侧边栏">
+        <svg viewBox="0 0 16 16" aria-hidden="true">
+          <path d="m10 3-5 5 5 5" />
+        </svg>
+      </button>
+
       <!-- data-tip 用于窄屏折叠态的悬停提示：此时文字标签被隐藏，只剩图标 -->
       <nav class="nav" id="nav">
         <!-- 导航图标统一为 16px 线性 SVG：同一套线宽与圆角，语义对应栏目名 -->
         <button class="nav-item active" data-view="ask" data-tip="AI 助手">
           <span class="nav-ico" aria-hidden="true">
             <!-- 对话气泡 + 星点：首页的 AI 问答 -->
-            <svg viewBox="0 0 16 16"><path d="M13.4 9.3a1.3 1.3 0 0 1-1.3 1.3H5.4L2.6 13.4V3.6a1.3 1.3 0 0 1 1.3-1.3h8.2a1.3 1.3 0 0 1 1.3 1.3Z"/><path d="M8 4.9v3.4"/><path d="M6.3 6.6h3.4"/></svg>
+            <svg viewBox="0 0 16 16">
+              <path
+                d="M13.4 9.3a1.3 1.3 0 0 1-1.3 1.3H5.4L2.6 13.4V3.6a1.3 1.3 0 0 1 1.3-1.3h8.2a1.3 1.3 0 0 1 1.3 1.3Z" />
+              <path d="M8 4.9v3.4" />
+              <path d="M6.3 6.6h3.4" />
+            </svg>
           </span><span class="nav-text">AI 助手</span>
         </button>
         <button class="nav-item" data-view="library" data-tip="文献库">
           <span class="nav-ico" aria-hidden="true">
             <!-- 摊开的书：文献收藏 -->
-            <svg viewBox="0 0 16 16"><path d="M8 4.1C6.5 3 4.6 2.8 2.6 3.3v8.6c2-.5 3.9-.3 5.4.8 1.5-1.1 3.4-1.3 5.4-.8V3.3C11.4 2.8 9.5 3 8 4.1Z"/><path d="M8 4.1v9.2"/></svg>
+            <svg viewBox="0 0 16 16">
+              <path
+                d="M8 4.1C6.5 3 4.6 2.8 2.6 3.3v8.6c2-.5 3.9-.3 5.4.8 1.5-1.1 3.4-1.3 5.4-.8V3.3C11.4 2.8 9.5 3 8 4.1Z" />
+              <path d="M8 4.1v9.2" />
+            </svg>
           </span><span class="nav-text">文献库</span>
         </button>
         <button class="nav-item" data-view="review" data-tip="提取结果">
           <span class="nav-ico" aria-hidden="true">
             <!-- 文档 + 勾：已抽取并待核对的字段 -->
-            <svg viewBox="0 0 16 16"><path d="M9.1 1.9H4.6a1.1 1.1 0 0 0-1.1 1.1v10a1.1 1.1 0 0 0 1.1 1.1h6.8a1.1 1.1 0 0 0 1.1-1.1V5.3Z"/><path d="M9.1 1.9v3.4h3.4"/><path d="m6 10 1.3 1.3L10 8.6"/></svg>
+            <svg viewBox="0 0 16 16">
+              <path d="M9.1 1.9H4.6a1.1 1.1 0 0 0-1.1 1.1v10a1.1 1.1 0 0 0 1.1 1.1h6.8a1.1 1.1 0 0 0 1.1-1.1V5.3Z" />
+              <path d="M9.1 1.9v3.4h3.4" />
+              <path d="m6 10 1.3 1.3L10 8.6" />
+            </svg>
           </span><span class="nav-text">提取结果</span>
         </button>
         <button class="nav-item" data-view="compare" data-tip="样品对比">
           <span class="nav-ico" aria-hidden="true">
             <!-- 柱状对照：样品指标横向比较 -->
-            <svg viewBox="0 0 16 16"><path d="M2.6 13.4h10.8"/><path d="M4.9 13.4V6.6"/><path d="M8 13.4V3.4"/><path d="M11.1 13.4V8.8"/></svg>
+            <svg viewBox="0 0 16 16">
+              <path d="M2.6 13.4h10.8" />
+              <path d="M4.9 13.4V6.6" />
+              <path d="M8 13.4V3.4" />
+              <path d="M11.1 13.4V8.8" />
+            </svg>
           </span><span class="nav-text">样品对比</span>
         </button>
         <button class="nav-item" data-view="search" data-tip="跨论文检索">
           <span class="nav-ico" aria-hidden="true">
             <!-- 文档 + 放大镜：在多篇论文中检索 -->
-            <svg viewBox="0 0 16 16"><rect x="1.6" y="1.9" width="5.4" height="6.8" rx="1"/><path d="M3.2 4.3h2.3"/><path d="M3.2 6.3h2.3"/><circle cx="11" cy="10.7" r="2.6"/><path d="m12.9 12.6 1.4 1.4"/></svg>
+            <svg viewBox="0 0 16 16">
+              <rect x="1.6" y="1.9" width="5.4" height="6.8" rx="1" />
+              <path d="M3.2 4.3h2.3" />
+              <path d="M3.2 6.3h2.3" />
+              <circle cx="11" cy="10.7" r="2.6" />
+              <path d="m12.9 12.6 1.4 1.4" />
+            </svg>
           </span><span class="nav-text">跨论文检索</span>
         </button>
         <button class="nav-item" data-view="jobs" data-tip="任务与日志">
           <span class="nav-ico" aria-hidden="true">
             <!-- 时钟：运行记录与历史日志 -->
-            <svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.6"/><path d="M8 4.7V8l2.3 1.4"/></svg>
+            <svg viewBox="0 0 16 16">
+              <circle cx="8" cy="8" r="5.6" />
+              <path d="M8 4.7V8l2.3 1.4" />
+            </svg>
           </span><span class="nav-text">任务与日志</span>
         </button>
       </nav>
@@ -150,8 +183,7 @@
 
           <!-- 右上角头像：未登录时点开去登录/注册，已登录时点开账号菜单 -->
           <div class="account-menu" id="accountMenu">
-            <button class="avatar-btn" id="avatarBtn" aria-haspopup="true" aria-expanded="false"
-              title="账号">
+            <button class="avatar-btn" id="avatarBtn" aria-haspopup="true" aria-expanded="false" title="账号">
               <span class="avatar-letter" id="accountAvatar">?</span>
             </button>
 
@@ -185,7 +217,8 @@
         </div>
       </header>
 
-      <!-- AI 助手独立成首页：整屏对话，不再挤在右侧细栏里 -->
+      <!-- AI 助手独立成首页，也会在悬浮入口打开时移入右侧抽屉 -->
+      <div class="ask-view-slot" id="askViewSlot">
       <section class="view active" id="view-ask">
         <div class="ask-page">
           <div class="ask-page-head">
@@ -194,8 +227,7 @@
               <select class="select" id="askScope">
                 <option value="">全部论文（共享语料）</option>
               </select>
-              <button class="btn sm" id="askPickBtn"
-                      title="勾选多篇论文，只用它们回答">勾选多篇…</button>
+              <button class="btn sm" id="askPickBtn" title="勾选多篇论文，只用它们回答">勾选多篇…</button>
             </div>
             <span class="ask-scope-note" id="askScopeLabel">全部论文（共享语料）</span>
           </div>
@@ -212,7 +244,7 @@
             <div class="ask-pick-list" id="askPickList"></div>
           </div>
           <div class="ask-body" id="askBody">
-            <div class="ask-msg bot">
+            <div class="ask-msg bot" data-chat-welcome>
               <p>你可以这样问：</p>
               <div class="chips">
                 <button class="chip">比表面积最高的样品是多少？</button>
@@ -229,6 +261,7 @@
           </form>
         </div>
       </section>
+      </div>
 
       <section class="view" id="view-library">
         <!-- 首次使用的三步指引：新手最容易卡在“上传完之后该干什么” -->
@@ -244,6 +277,10 @@
         <div class="upload-zone" id="uploadZone">
           <strong>把 PDF 拖到这里</strong>
           <span>解析后即可创建抽取任务；支持多选上传</span>
+          <div class="upload-status" id="uploadStatus" role="status" aria-live="polite" hidden>
+            <i class="spin" aria-hidden="true"></i>
+            <span>上传成功，解析中…</span>
+          </div>
         </div>
 
         <!-- 文件夹：按研究主题归纳论文，点击可筛选 -->
@@ -259,22 +296,28 @@
           </label>
           <span class="bulk-count" id="bulkCount">已选 0 篇</span>
           <span class="bulk-sep"></span>
-          <span class="bulk-label">抽取方式</span>
-          <select class="select" id="bulkMode" title="批量抽取方式"></select>
-          <button class="btn primary" id="bulkRun" disabled>一键抽取</button>
-          <button class="btn" id="bulkRunPending" title="只抽取尚未抽取的论文">抽取全部待抽取</button>
+          <div class="bulk-run-dropdown">
+            <button class="btn primary bulk-run-trigger" id="bulkRun" data-bulk-run="picked"
+              aria-haspopup="menu" aria-expanded="false" aria-controls="bulkModeMenuPicked" disabled>
+              <span id="bulkRunLabel">一键抽取</span><span class="paper-run-caret" aria-hidden="true">▾</span>
+            </button>
+            <div class="paper-mode-menu" id="bulkModeMenuPicked" role="menu"></div>
+          </div>
+          <div class="bulk-run-dropdown">
+            <button class="btn bulk-run-trigger" id="bulkRunPending" data-bulk-run="pending"
+              title="只抽取尚未抽取的论文" aria-haspopup="menu" aria-expanded="false"
+              aria-controls="bulkModeMenuPending" disabled>
+              <span id="bulkRunPendingLabel">抽取全部待抽取</span>
+              <span class="paper-run-caret" aria-hidden="true">▾</span>
+            </button>
+            <div class="paper-mode-menu" id="bulkModeMenuPending" role="menu"></div>
+          </div>
           <span class="bulk-sep"></span>
           <span class="bulk-label">归纳到</span>
           <select class="select" id="bulkFolder" title="把选中的论文移动到文件夹"></select>
           <button class="btn" id="bulkMove" disabled>移动</button>
           <button class="btn danger" id="bulkDelete" disabled>一键删除</button>
         </div>
-        <div class="help-tip bulk-hint" id="bulkHint" hidden>
-          <button class="help-icon" type="button" aria-label="抽取方式说明" aria-expanded="false"
-            aria-controls="bulkHintContent">?</button>
-          <div class="help-popover" id="bulkHintContent"></div>
-        </div>
-
         <!-- 进行中的任务单独成组，带百分比与阶段文字 -->
         <section class="lib-group" id="groupRunning" hidden>
           <div class="group-head">
@@ -341,19 +384,16 @@
                 <!-- 原版 = PDF 实际版面（含图表）；文本 = 可复制的纯文字 -->
                 <div class="view-toggle" id="pageViewToggle" role="group" aria-label="原文显示方式">
                   <button class="view-toggle-btn active" data-pageview="image"
-                          title="显示 PDF 原始版面，图表、公式、分栏都和原文一致">原版</button>
-                  <button class="view-toggle-btn" data-pageview="text"
-                          title="显示纯文字，便于复制数值和逐字核对">文本</button>
-                  <button class="view-toggle-btn" data-pageview="zh"
-                          title="把本页英文正文翻译成中文">中文</button>
+                    title="显示 PDF 原始版面，图表、公式、分栏都和原文一致">原版</button>
+                  <button class="view-toggle-btn" data-pageview="text" title="显示纯文字，便于复制数值和逐字核对">文本</button>
+                  <button class="view-toggle-btn" data-pageview="zh" title="把本页英文正文翻译成中文">中文</button>
                 </div>
                 <!-- 次要工具收进「更多」，避免挤占翻页按钮的位置 -->
                 <div class="tool-menu" id="toolMenu">
-                  <button class="icon-btn" id="toolMenuBtn" title="更多工具"
-                          aria-haspopup="true" aria-expanded="false">⋯</button>
+                  <button class="icon-btn" id="toolMenuBtn" title="更多工具" aria-haspopup="true"
+                    aria-expanded="false">⋯</button>
                   <div class="tool-popover" id="toolPopover" hidden>
-                    <button class="tool-item" id="regionMode"
-                            title="开启后在页面上拖出一个区域，只翻译该区域">▭ 框选翻译</button>
+                    <button class="tool-item" id="regionMode" title="开启后在页面上拖出一个区域，只翻译该区域">▭ 框选翻译</button>
                     <div class="tool-row">
                       <span>缩放</span>
                       <button class="icon-btn" id="zoomOut" title="缩小">－</button>
@@ -363,7 +403,7 @@
                     <div class="tool-row">
                       <span>翻译服务</span>
                       <select class="select tiny-select" id="translateProvider"
-                              title="选择翻译服务；没有 AI 密钥时可用免费的 MyMemory"></select>
+                        title="选择翻译服务；没有 AI 密钥时可用免费的 MyMemory"></select>
                     </div>
                   </div>
                 </div>
@@ -412,8 +452,8 @@
             </div>
           </div>
           <!-- 拖动调整左右占比 -->
-          <div class="workbench-split" id="workbenchSplit" role="separator"
-               aria-orientation="vertical" tabindex="0" title="拖动调整左右宽度；双击复位"></div>
+          <div class="workbench-split" id="workbenchSplit" role="separator" aria-orientation="vertical" tabindex="0"
+            title="拖动调整左右宽度；双击复位"></div>
           <div class="panel field-panel">
             <div class="panel-head">
               <span>抽取记录</span>
@@ -492,8 +532,7 @@
       <section class="view" id="view-search">
         <div class="filter-bar">
           <input class="input grow" id="searchQ" placeholder="字段值关键词，例如 P123、cubic、TEOS" />
-          <input class="input" id="searchPaperQ" placeholder="按文件名/论文名筛选"
-                 title="只在名称匹配的论文里检索，支持文件名和自定义名称" />
+          <input class="input" id="searchPaperQ" placeholder="按文件名/论文名筛选" title="只在名称匹配的论文里检索，支持文件名和自定义名称" />
           <select class="select" id="searchFolder" title="限定在某个文件夹内检索"></select>
           <select class="select" id="searchField" title="默认在全部字段里找；选定某个字段可缩小范围">
             <option value="">全部字段</option>
@@ -556,6 +595,14 @@
         </div>
       </section>
     </main>
+
+    <aside class="ai-drawer" id="aiDrawer" aria-label="AI 助手">
+      <div class="ai-drawer-head">
+        <strong>AI 助手</strong>
+        <button class="icon-btn" id="aiDrawerClose" type="button" aria-label="关闭 AI 助手">×</button>
+      </div>
+      <div class="ai-drawer-content" id="aiDrawerContent"></div>
+    </aside>
 
     <!-- ---------------- 个人信息 ---------------- -->
     <div class="modal-mask" id="profileMask" hidden>
@@ -654,6 +701,31 @@
       </div>
     </div>
 
+    <div class="modal-mask" id="appDialogMask" hidden>
+      <div class="modal app-dialog" role="dialog" aria-modal="true"
+        aria-labelledby="appDialogTitle" aria-describedby="appDialogMessage">
+        <div class="modal-head">
+          <div>
+            <strong id="appDialogTitle"></strong>
+            <span class="app-dialog-message" id="appDialogMessage"></span>
+          </div>
+          <button class="icon-btn" id="appDialogClose" type="button"
+            title="关闭" aria-label="关闭">×</button>
+        </div>
+        <div class="modal-body">
+          <label class="setting-row app-dialog-input-row" id="appDialogInputRow" hidden>
+            <span class="setting-label" id="appDialogInputLabel"></span>
+            <input class="input" id="appDialogInput" />
+          </label>
+        </div>
+        <div class="modal-foot">
+          <span class="modal-foot-gap"></span>
+          <button class="btn" id="appDialogCancel" type="button">取消</button>
+          <button class="btn primary" id="appDialogConfirm" type="button">确定</button>
+        </div>
+      </div>
+    </div>
+
     <!-- ---------------- 内容总结 ---------------- -->
     <div class="modal-mask" id="summaryMask" hidden>
       <div class="modal summary-modal" role="dialog" aria-modal="true" aria-labelledby="summaryTitle">
@@ -726,21 +798,18 @@
           </label>
           <p class="setting-hint">留空表示沿用已保存的密钥（修改模型时不必重新输入）。</p>
 
-          <details class="setting-adv" id="settingAdv">
-            <summary>3 · 接口地址与模型（选服务商后已自动填好，一般不用改）</summary>
-            <label class="setting-row">
-              <span class="setting-label">接口地址</span>
-              <input class="input" id="settingBaseUrl" spellcheck="false" placeholder="https://… 填到 /v1 为止" />
-            </label>
-            <label class="setting-row">
-              <span class="setting-label">模型名称</span>
-              <input class="input" id="settingModel" spellcheck="false" placeholder="例如 deepseek-chat" />
-            </label>
-            <p class="setting-hint">
-              地址必须以 http:// 或 https:// 开头，且<b>不要</b>带 /chat/completions。
-              模型名要和服务商文档里的写法完全一致。
-            </p>
-          </details>
+          <label class="setting-row">
+            <span class="setting-label">3 · 接口地址</span>
+            <input class="input" id="settingBaseUrl" spellcheck="false" placeholder="https://… 填到 /v1 为止" />
+          </label>
+          <label class="setting-row">
+            <span class="setting-label">4 · 模型名称</span>
+            <input class="input" id="settingModel" spellcheck="false" placeholder="例如 deepseek-chat" />
+          </label>
+          <p class="setting-hint">
+            地址必须以 http:// 或 https:// 开头，且<b>不要</b>带 /chat/completions。
+            模型名要和服务商文档里的写法完全一致。
+          </p>
 
           <div class="setting-result" id="settingResult" hidden></div>
         </div>
@@ -784,6 +853,11 @@
 
     <div class="toast-wrap" id="toastWrap"></div>
   </div>
+  <button class="ai-launcher" id="aiLauncher" type="button" hidden aria-expanded="false"
+    aria-controls="aiDrawer" aria-label="打开 AI 助手" title="拖动调整位置，点击打开 AI 助手">
+    <span class="ai-launcher-icon" aria-hidden="true">✦</span>
+    <span>AI 助手</span>
+  </button>
   <script src="/static/app.js?v=__ASSET_V__"></script>
 </body>
 

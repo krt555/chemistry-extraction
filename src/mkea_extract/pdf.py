@@ -216,7 +216,7 @@ class PDFLoader:
 
         if not pages or _looks_scanned(pages):
             raise PDFError(
-                f"no usable text in {path}; install poppler/tesseract or pass --no-ocr to inspect"
+                f"no usable text in {path}; the PDF may be image-only or protected"
             )
         result = PaperText(
             paper_id=paper_id, path=path, pages=pages, ocr_pages=ocr_pages, tables=tables

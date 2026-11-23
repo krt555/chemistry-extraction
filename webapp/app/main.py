@@ -1708,6 +1708,39 @@ async def api_ask(request: Request) -> dict[str, Any]:
     return result
 
 
+@app.get("/api/chat/history")
+def api_chat_history(request: Request) -> dict[str, Any]:
+    user = current_user(request)
+    rows = db.query(
+        "SELECT id, question, answer, citations_json, scope, engine, notice,"
+        " corpus_papers, created_at FROM chat_turns WHERE user_fk = ? ORDER BY id",
+        (user["id"],),
+    )
+    for row in rows:
+        row["citations"] = loads(row.pop("citations_json"), [])
+    return {"turns": rows}
+
+
+def _save_chat_turn(
+    user_fk: int,
+    question: str,
+    answer: str,
+    citations: list[dict[str, Any]],
+    scope: str,
+    engine: str,
+    notice: str,
+    corpus_papers: int,
+) -> None:
+    db.execute(
+        "INSERT INTO chat_turns (user_fk, question, answer, citations_json, scope,"
+        " engine, notice, corpus_papers, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            user_fk, question, answer, dumps(citations), scope, engine, notice,
+            corpus_papers, now(),
+        ),
+    )
+
+
 @app.post("/api/ask/stream")
 async def api_ask_stream(request: Request):
     """Same as /api/ask, but streams the answer token by token (SSE)."""
@@ -1737,29 +1770,51 @@ async def api_ask_stream(request: Request):
         citation["shared"] = bool(match and match["id"] not in own)
 
     def events():
+        answer_parts: list[str] = []
+        engine = "retrieval"
+        notice = ""
+        corpus_papers = len({chunk["paper_fk"] for chunk in retriever.chunks})
         # 先把引文发给前端：检索已经完成，用户可以立刻看到来源
         yield _sse("meta", {
             "citations": citations,
             "scope": scope["label"],
-            "corpus_papers": len({chunk["paper_fk"] for chunk in retriever.chunks}),
+            "corpus_papers": corpus_papers,
         })
         if not hits:
-            yield _sse("delta", {"text": "检索到的页面中没有相关信息。可以换个说法，或先确认该论文已完成抽取。"})
-            yield _sse("done", {"engine": "retrieval"})
+            answer = "检索到的页面中没有相关信息。可以换个说法，或先确认该论文已完成抽取。"
+            _save_chat_turn(
+                user["id"], question, answer, citations, scope["label"], engine,
+                notice, corpus_papers,
+            )
+            yield _sse("delta", {"text": answer})
+            yield _sse("done", {"engine": engine})
             return
 
         if llm_status()["available"]:
             try:
                 for piece in stream_answer(question, hits):
+                    answer_parts.append(piece)
                     yield _sse("delta", {"text": piece})
-                yield _sse("done", {"engine": "llm"})
-                return
             except Exception as exc:  # 退回抽取式，不让对话中断
-                yield _sse("notice", {"text": f"AI 回答失败，已改用检索式：{exc}"})
+                notice = f"AI 回答失败，已改用检索式：{exc}"
+                yield _sse("notice", {"text": notice})
+            else:
+                engine = "llm"
+                _save_chat_turn(
+                    user["id"], question, "".join(answer_parts), citations,
+                    scope["label"], engine, notice, corpus_papers,
+                )
+                yield _sse("done", {"engine": engine})
+                return
 
         fallback = build_answer(question, hits, False)
+        answer_parts.append(fallback["answer"])
+        _save_chat_turn(
+            user["id"], question, "".join(answer_parts), citations,
+            scope["label"], engine, notice, corpus_papers,
+        )
         yield _sse("delta", {"text": fallback["answer"]})
-        yield _sse("done", {"engine": "retrieval"})
+        yield _sse("done", {"engine": engine})
 
     return StreamingResponse(events(), media_type="text/event-stream", headers=_SSE_HEADERS)
 

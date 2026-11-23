@@ -114,9 +114,23 @@ CREATE TABLE IF NOT EXISTS edits (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS chat_turns (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_fk        INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    question       TEXT NOT NULL,
+    answer         TEXT NOT NULL,
+    citations_json TEXT NOT NULL DEFAULT '[]',
+    scope          TEXT NOT NULL DEFAULT '',
+    engine         TEXT NOT NULL DEFAULT 'retrieval',
+    notice         TEXT NOT NULL DEFAULT '',
+    corpus_papers  INTEGER NOT NULL DEFAULT 0,
+    created_at     TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_records_paper ON records(paper_fk);
 CREATE INDEX IF NOT EXISTS idx_jobs_paper ON jobs(paper_fk);
 CREATE INDEX IF NOT EXISTS idx_pages_paper ON paper_pages(paper_fk);
+CREATE INDEX IF NOT EXISTS idx_chat_turns_user ON chat_turns(user_fk, id);
 """
 
 # 旧库升级：CREATE TABLE IF NOT EXISTS 不会给已存在的表补列，

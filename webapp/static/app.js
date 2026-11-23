@@ -54,6 +54,85 @@ function on(id, event, handler, options) {
   return node;
 }
 
+let appDialogResolve = null;
+let appDialogMode = "confirm";
+let appDialogPreviousFocus = null;
+
+function closeAppDialog(value) {
+  const resolve = appDialogResolve;
+  appDialogResolve = null;
+  $("appDialogMask").hidden = true;
+  if (appDialogPreviousFocus && appDialogPreviousFocus.isConnected) {
+    appDialogPreviousFocus.focus();
+  }
+  appDialogPreviousFocus = null;
+  if (resolve) resolve(value);
+}
+
+function showAppDialog(options) {
+  if (appDialogResolve) closeAppDialog(null);
+  return new Promise((resolve) => {
+    const inputRow = $("appDialogInputRow");
+    const input = $("appDialogInput");
+    const hasInput = options.input !== undefined;
+    appDialogMode = hasInput ? "prompt" : "confirm";
+    appDialogResolve = resolve;
+    appDialogPreviousFocus = document.activeElement;
+    $("appDialogTitle").textContent = options.title || (hasInput ? "输入内容" : "确认操作");
+    $("appDialogMessage").textContent = options.message || "";
+    $("appDialogConfirm").textContent = options.confirmLabel || (hasInput ? "确定" : "确认");
+    $("appDialogCancel").textContent = options.cancelLabel || "取消";
+    $("appDialogConfirm").className = options.danger ? "btn danger" : "btn primary";
+    $("appDialogMask").querySelector(".app-dialog").classList.toggle("has-input", hasInput);
+    inputRow.hidden = !hasInput;
+    input.required = false;
+    if (hasInput) {
+      $("appDialogInputLabel").textContent = options.inputLabel || "名称";
+      input.value = options.input;
+      input.placeholder = options.placeholder || "";
+      input.maxLength = options.maxLength || 200;
+    } else {
+      input.value = "";
+      input.placeholder = "";
+    }
+    $("appDialogMask").hidden = false;
+    requestAnimationFrame(() => (hasInput ? input : $("appDialogConfirm")).focus());
+    if (hasInput) requestAnimationFrame(() => input.select());
+  });
+}
+
+function confirmDialog(message, options = {}) {
+  return showAppDialog({ ...options, message }).then((result) => result === true);
+}
+
+function promptDialog(message, options = {}) {
+  return showAppDialog({ ...options, message, input: options.input ?? "" });
+}
+
+on("appDialogConfirm", "click", () => {
+  closeAppDialog(appDialogMode === "prompt" ? $("appDialogInput").value : true);
+});
+function cancelAppDialog() {
+  closeAppDialog(appDialogMode === "prompt" ? null : false);
+}
+on("appDialogCancel", "click", cancelAppDialog);
+on("appDialogClose", "click", cancelAppDialog);
+on("appDialogMask", "click", (event) => {
+  if (event.target.id === "appDialogMask") cancelAppDialog();
+});
+document.addEventListener("keydown", (event) => {
+  if ($("appDialogMask").hidden) return;
+  if (event.key === "Escape") {
+    event.stopImmediatePropagation();
+    cancelAppDialog();
+  } else if (event.key === "Enter" && appDialogMode === "prompt"
+      && event.target === $("appDialogInput")) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    closeAppDialog($("appDialogInput").value);
+  }
+});
+
 async function api(path, options = {}) {
   const response = await fetch(path, { credentials: "same-origin", ...options });
   if (!response.ok) {
@@ -77,7 +156,7 @@ async function api(path, options = {}) {
     // 404/405 出现在本应存在的接口上，说明后端跑的是旧版代码。
     // 直接说清楚，别让用户对着裸状态码猜。
     if ((response.status === 404 || response.status === 405)
-        && /^\/api\/(folders|papers\/move|translate)/.test(path)) {
+      && /^\/api\/(folders|papers\/move|translate)/.test(path)) {
       error.message =
         "这个功能在当前运行的后端里不存在：服务加载的是旧版代码。"
         + "请在项目目录重新启动服务（启动时会打印接口自检结果）。";
@@ -238,6 +317,7 @@ function clearSessionState() {
   S.user = null;
   S.papers = [];
   S.paper = null;
+  resetAskHistory();
   S.picked.clear();
   S.pageCache.clear();
   S.pollers.forEach((timer) => clearInterval(timer));
@@ -456,7 +536,108 @@ const VIEW_META = {
   jobs: ["任务与日志", "抽取任务状态、使用的引擎与模型、运行提示"],
 };
 
+function activeViewName() {
+  const active = document.querySelector(".nav-item.active");
+  return active ? active.dataset.view : "";
+}
+
+function syncAiLauncher() {
+  const launcher = $("aiLauncher");
+  const open = document.querySelector(".app").classList.contains("ai-drawer-open");
+  const label = open ? "关闭 AI 助手" : "打开 AI 助手";
+  launcher.hidden = activeViewName() === "ask";
+  launcher.setAttribute("aria-expanded", String(open));
+  launcher.setAttribute("aria-label", label);
+  launcher.title = `拖动调整位置，点击${open ? "关闭" : "打开"} AI 助手`;
+}
+
+function openAiDrawer() {
+  if (activeViewName() === "ask") return;
+  const app = document.querySelector(".app");
+  $("aiDrawerContent").append($("view-ask"));
+  $("view-ask").classList.add("active");
+  app.classList.add("ai-drawer-open");
+  syncAiLauncher();
+  requestAnimationFrame(() => $("askInput").focus());
+}
+
+function closeAiDrawer() {
+  const app = document.querySelector(".app");
+  if (!app.classList.contains("ai-drawer-open")) return;
+  $("askViewSlot").append($("view-ask"));
+  $("view-ask").classList.toggle("active", activeViewName() === "ask");
+  app.classList.remove("ai-drawer-open");
+  syncAiLauncher();
+}
+
+let aiLauncherDrag = null;
+let suppressAiLauncherClick = false;
+
+on("aiLauncher", "pointerdown", (event) => {
+  if (event.button !== 0) return;
+  const rect = event.currentTarget.getBoundingClientRect();
+  aiLauncherDrag = {
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    startY: event.clientY,
+    left: rect.left,
+    top: rect.top,
+    moved: false,
+  };
+  event.currentTarget.setPointerCapture(event.pointerId);
+});
+
+on("aiLauncher", "pointermove", (event) => {
+  if (!aiLauncherDrag || aiLauncherDrag.pointerId !== event.pointerId) return;
+  const dx = event.clientX - aiLauncherDrag.startX;
+  const dy = event.clientY - aiLauncherDrag.startY;
+  if (!aiLauncherDrag.moved && Math.hypot(dx, dy) < 4) return;
+  aiLauncherDrag.moved = true;
+  const launcher = event.currentTarget;
+  const left = Math.max(8, Math.min(window.innerWidth - launcher.offsetWidth - 8,
+    aiLauncherDrag.left + dx));
+  const top = Math.max(8, Math.min(window.innerHeight - launcher.offsetHeight - 8,
+    aiLauncherDrag.top + dy));
+  launcher.style.left = `${left}px`;
+  launcher.style.top = `${top}px`;
+  launcher.style.right = "auto";
+  launcher.style.bottom = "auto";
+  launcher.classList.add("dragging");
+  event.preventDefault();
+});
+
+function finishAiLauncherDrag(event) {
+  if (!aiLauncherDrag || aiLauncherDrag.pointerId !== event.pointerId) return;
+  const moved = aiLauncherDrag.moved;
+  aiLauncherDrag = null;
+  const launcher = $("aiLauncher");
+  launcher.classList.remove("dragging");
+  if (launcher.hasPointerCapture(event.pointerId)) launcher.releasePointerCapture(event.pointerId);
+  if (moved) {
+    suppressAiLauncherClick = true;
+    setTimeout(() => { suppressAiLauncherClick = false; }, 500);
+  }
+}
+
+on("aiLauncher", "pointerup", finishAiLauncherDrag);
+on("aiLauncher", "pointercancel", finishAiLauncherDrag);
+on("aiLauncher", "click", () => {
+  if (suppressAiLauncherClick) { suppressAiLauncherClick = false; return; }
+  const app = document.querySelector(".app");
+  if (app.classList.contains("ai-drawer-open")) closeAiDrawer();
+  else openAiDrawer();
+});
+on("aiDrawerClose", "click", closeAiDrawer);
+window.addEventListener("resize", () => {
+  const launcher = $("aiLauncher");
+  if (!launcher.style.left) return;
+  const rect = launcher.getBoundingClientRect();
+  launcher.style.left = `${Math.max(8, Math.min(window.innerWidth - rect.width - 8, rect.left))}px`;
+  launcher.style.top = `${Math.max(8, Math.min(window.innerHeight - rect.height - 8, rect.top))}px`;
+});
+
 function showView(name) {
+  closeAiDrawer();
   document.querySelectorAll(".nav-item").forEach((b) =>
     b.classList.toggle("active", b.dataset.view === name));
   document.querySelectorAll(".view").forEach((v) =>
@@ -464,6 +645,7 @@ function showView(name) {
   const [title, sub] = VIEW_META[name];
   $("viewTitle").textContent = title;
   $("viewSub").textContent = sub;
+  syncAiLauncher();
   hideBrief();
   if (name === "ask") $("askInput").focus();
   if (name === "jobs") loadJobs();
@@ -482,6 +664,32 @@ on("nav", "click", (event) => {
   const button = event.target.closest(".nav-item");
   if (button) showView(button.dataset.view);
 });
+
+function sidebarIsExpanded() {
+  const app = document.querySelector(".app");
+  if (app.classList.contains("sidebar-expanded")) return true;
+  if (app.classList.contains("sidebar-collapsed")) return false;
+  return !window.matchMedia("(max-width: 1100px)").matches;
+}
+
+function syncSidebarToggle() {
+  const button = $("sidebarToggle");
+  const expanded = sidebarIsExpanded();
+  const label = expanded ? "收起侧边栏" : "展开侧边栏";
+  button.setAttribute("aria-expanded", String(expanded));
+  button.setAttribute("aria-label", label);
+  button.title = label;
+}
+
+on("sidebarToggle", "click", () => {
+  const app = document.querySelector(".app");
+  const expanded = !sidebarIsExpanded();
+  app.classList.toggle("sidebar-expanded", expanded);
+  app.classList.toggle("sidebar-collapsed", !expanded);
+  syncSidebarToggle();
+});
+window.addEventListener("resize", syncSidebarToggle);
+syncSidebarToggle();
 
 /* ------------------------------------------------------------------ */
 /* status                                                              */
@@ -508,56 +716,130 @@ async function loadStatus() {
     S.fields.forEach((f) => fieldSelect.add(new Option(f.label, f.key)));
   }
 
-  renderModeSelect($("bulkMode"));
-  syncBulkHint();
+  renderBulkModeMenus();
 }
 
 /* ------------------------------------------------------------------ */
 /* extraction modes                                                    */
 /* ------------------------------------------------------------------ */
 
-function defaultMode() {
-  const llmReady = S.status && S.status.llm && S.status.llm.available;
-  if (!llmReady) return "rules";
-  const recommended = S.modes.find((m) => m.recommended);
-  return recommended ? recommended.value : "anchored";
-}
-
-/** 渲染简洁的抽取方式名称；悬停选项可查看完整说明。 */
-function renderModeSelect(select, selected = null) {
-  if (!select || !S.modes.length) return;
-  const want = selected || select.value || defaultMode();
-  select.innerHTML = S.modes.map((mode) => {
-    const unavailable = mode.needs_llm && !(S.status.llm && S.status.llm.available);
-    const title = `${mode.summary} ${mode.detail}${unavailable ? " 未连接 AI，将自动改用离线规则。" : ""}`;
-    return `<option value="${mode.value}" title="${esc(title)}">
-      ${esc(mode.label)}
-    </option>`;
-  }).join("");
-  select.value = S.modes.some((m) => m.value === want) ? want : defaultMode();
-}
-
 function modeOf(value) {
   return S.modes.find((m) => m.value === value) || null;
 }
 
-/** 批量抽取方式的悬停说明，随所选方式变化。 */
-function syncBulkHint() {
-  const hint = $("bulkHint");
-  const content = $("bulkHintContent");
-  const mode = modeOf($("bulkMode").value);
-  if (!mode) { hint.hidden = true; return; }
-  const llmReady = S.status && S.status.llm && S.status.llm.available;
-  hint.hidden = false;
-  content.innerHTML = mode.needs_llm && !llmReady
-    ? `当前选择「${esc(mode.short)}」需要 AI，但还没连接 AI 服务，系统会自动改用离线规则。`
-    + ` <a href="#" id="bulkHintLink">现在连接 →</a>`
-    : `「${esc(mode.short)}」：${esc(mode.detail)}`;
-  const link = $("bulkHintLink");
-  if (link) link.addEventListener("click", (e) => { e.preventDefault(); openSettings(); });
+async function startPaperExtraction(paperFk, mode) {
+  const paper = S.papers.find((item) => item.id === paperFk);
+  const meta = modeOf(mode);
+  if (!paper || !meta) {
+    toast("文献或抽取方式已失效，请刷新后重试", "err");
+    return;
+  }
+  const trigger = document.querySelector(
+    `.paper-card[data-id="${paperFk}"] [data-act="run-menu"]`);
+  if (trigger && trigger.disabled) return;
+  if (trigger) trigger.disabled = true;
+  try {
+    const job = await api("/api/jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ paper_fk: paper.id, mode }),
+    });
+    toast(`任务已创建（${meta.short}），进度显示在“正在抽取”`);
+    await loadPapers();
+    pollJob(job.id);
+  } catch (error) { toast(error.message, "err"); }
+  finally {
+    if (trigger && trigger.isConnected) trigger.disabled = false;
+  }
 }
 
-on("bulkMode", "change", syncBulkHint);
+function setPaperModeMenu(wrapper, open) {
+  const card = wrapper.closest(".paper-card");
+  const trigger = wrapper.querySelector(".paper-run-trigger, .bulk-run-trigger");
+  if (open && trigger.disabled) return;
+  wrapper.classList.toggle("open", open);
+  if (card) card.classList.toggle("mode-menu-open", open);
+  trigger.setAttribute("aria-expanded", String(open));
+  if (open) {
+    const menu = wrapper.querySelector(".paper-mode-menu");
+    wrapper.classList.toggle("open-up",
+      window.innerHeight - trigger.getBoundingClientRect().bottom < menu.offsetHeight + 12);
+  } else {
+    wrapper.classList.remove("open-up");
+  }
+}
+
+function closePaperModeMenus(except = null) {
+  document.querySelectorAll(".paper-run-dropdown.open, .bulk-run-dropdown.open").forEach((wrapper) => {
+    if (wrapper !== except) setPaperModeMenu(wrapper, false);
+  });
+}
+
+function paperModeOptionsHtml(action = "run-mode") {
+  return S.modes.map((mode) => {
+    return `<button type="button" class="paper-mode-option" role="menuitem"
+      data-act="${action}" data-mode="${esc(mode.value)}">
+      <strong>${esc(mode.label)}</strong>
+      <span class="paper-mode-summary" role="tooltip">${esc(mode.summary)}</span>
+    </button>`;
+  }).join("");
+}
+
+function renderBulkModeMenus() {
+  $("bulkModeMenuPicked").innerHTML = paperModeOptionsHtml("bulk-run-picked-mode");
+  $("bulkModeMenuPending").innerHTML = paperModeOptionsHtml("bulk-run-pending-mode");
+}
+
+function positionModeSummary(option) {
+  const rect = option.getBoundingClientRect();
+  const rightRoom = window.innerWidth - rect.right - 12;
+  const leftRoom = rect.left - 12;
+  const useLeft = leftRoom > rightRoom;
+  const available = useLeft ? leftRoom : rightRoom;
+  const width = Math.max(120, Math.min(260, available));
+  option.classList.toggle("summary-left", useLeft);
+  option.style.setProperty("--mode-summary-width", `${width}px`);
+}
+
+document.addEventListener("click", (event) => {
+  if (!event.target.closest(".paper-run-dropdown, .bulk-run-dropdown")) closePaperModeMenus();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  const wrapper = document.querySelector(".paper-run-dropdown.open, .bulk-run-dropdown.open");
+  if (!wrapper) return;
+  setPaperModeMenu(wrapper, false);
+  wrapper.querySelector(".paper-run-trigger, .bulk-run-trigger").focus();
+});
+
+function bindModeMenuEvents(root) {
+  root.addEventListener("pointerover", (event) => {
+    const option = event.target.closest(".paper-mode-option");
+    if (option && !option.contains(event.relatedTarget)) positionModeSummary(option);
+    const wrapper = event.target.closest(".paper-run-dropdown, .bulk-run-dropdown");
+    if (!wrapper || wrapper.contains(event.relatedTarget)) return;
+    closePaperModeMenus(wrapper);
+    setPaperModeMenu(wrapper, true);
+  });
+  root.addEventListener("pointerout", (event) => {
+    const wrapper = event.target.closest(".paper-run-dropdown, .bulk-run-dropdown");
+    if (!wrapper || wrapper.contains(event.relatedTarget) || wrapper.matches(":focus-within")) return;
+    setPaperModeMenu(wrapper, false);
+  });
+  root.addEventListener("focusin", (event) => {
+    const option = event.target.closest(".paper-mode-option");
+    if (option) positionModeSummary(option);
+    const wrapper = event.target.closest(".paper-run-dropdown, .bulk-run-dropdown");
+    if (!wrapper) return;
+    closePaperModeMenus(wrapper);
+    setPaperModeMenu(wrapper, true);
+  });
+  root.addEventListener("focusout", (event) => {
+    const wrapper = event.target.closest(".paper-run-dropdown, .bulk-run-dropdown");
+    if (!wrapper || wrapper.contains(event.relatedTarget) || wrapper.matches(":hover")) return;
+    setPaperModeMenu(wrapper, false);
+  });
+}
 
 /* ------------------------------------------------------------------ */
 /* hover brief (简易版总结)                                            */
@@ -704,30 +986,47 @@ function paperCardHtml(paper, group) {
           <span class="paper-key">${esc(paper.paper_key)}</span>
           ${paper.renamed ? '<span class="paper-renamed" title="已自定义命名">已命名</span>' : ""}
         </label>
-        <!-- data-brief：鼠标悬停（不点击）即显示简易版总结 -->
-        <h3 class="paper-title" data-brief="${paper.id}">${esc(paper.title)}</h3>
+        <div class="paper-title-row">
+          <h3 class="paper-title" data-brief="${paper.id}">
+            <button type="button" class="paper-title-link" data-act="open"
+              ${paper.n_records ? "" : "disabled"}>${esc(paper.title)}</button>
+          </h3>
+          <button type="button" class="paper-rename-icon" data-act="rename"
+            title="编辑文献名称与备注" aria-label="编辑文献名称与备注">
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M10.8 2.8a1.8 1.8 0 0 1 2.5 2.5l-7.7 7.8-3.4.8.8-3.4Z"/>
+              <path d="m9.5 4.1 2.5 2.5"/>
+            </svg>
+          </button>
+        </div>
       </div>
-      ${statusBadge(job, paper)}
+      <div class="paper-top-actions">
+        ${statusBadge(job, paper)}
+        <button type="button" class="paper-delete" data-act="del"
+          title="删除文献" aria-label="删除文献">×</button>
+      </div>
     </div>
     ${paper.note ? `<div class="paper-note" title="${esc(paper.note)}">${esc(paper.note)}</div>` : ""}
     <div class="paper-dims">
       <span>${paper.pages} 页</span><span>${paper.n_tables} 表</span>
       <span>${(paper.chars / 1000).toFixed(1)}k 字符</span>
-      ${paper.n_records ? `<span>${paper.n_reviewed}/${paper.n_records} 已复核</span>` : ""}
+      ${paper.n_records ? `<span>提取结果 ${paper.n_reviewed}/${paper.n_records} 已复核</span>` : ""}
       ${paper.summary ? '<span class="paper-has-summary">已有总结</span>' : ""}
     </div>
     ${group === "failed" && job ? `<div class="paper-err">${esc(job.message || "未知错误")}</div>` : ""}
     <div class="paper-actions">
-      <select class="select sm" data-mode="${paper.id}" title="抽取方式"></select>
-      <button class="btn sm" data-act="run">${group === "done" ? "重抽" : "抽取"}</button>
-      <button class="btn sm" data-act="open" ${paper.n_records ? "" : "disabled"}>结果</button>
-    </div>
-    <div class="paper-actions second">
-      <button class="btn sm" data-act="summary"
+      <div class="paper-run-dropdown">
+        <button type="button" class="btn sm paper-run-trigger" data-act="run-menu"
+          aria-haspopup="menu" aria-expanded="false" aria-controls="paper-mode-menu-${paper.id}">
+          ${group === "done" ? "重抽" : "抽取"}<span class="paper-run-caret" aria-hidden="true">▾</span>
+        </button>
+        <div class="paper-mode-menu" id="paper-mode-menu-${paper.id}" role="menu">
+          ${paperModeOptionsHtml()}
+        </div>
+      </div>
+      <button class="btn sm paper-summary-button" data-act="summary"
         title="${paper.summary ? "查看抽取时自动生成的内容总结" : "该论文还没有总结：运行抽取会自动生成，也可点此立即生成"}"
         >内容总结${paper.summary ? "" : "（未生成）"}</button>
-      <button class="btn sm" data-act="rename" title="自定义显示名称并添加备注">命名/备注</button>
-      <button class="btn sm danger" data-act="del">删除</button>
     </div>
   </div>`;
 }
@@ -781,9 +1080,9 @@ function renderFolderBar() {
     <button class="folder-chip ${active ? "active" : ""}" data-folder="${id}">
       <span>${esc(label)}</span><em>${count}</em>
       ${id !== "" && id !== "none"
-        ? `<i class="folder-edit" data-folder-act="rename" title="重命名">✎</i>
+      ? `<i class="folder-edit" data-folder-act="rename" title="重命名">✎</i>
            <i class="folder-edit" data-folder-act="del" title="删除文件夹（论文不会被删）">×</i>`
-        : ""}
+      : ""}
     </button>`;
 
   const active = S.folderFilter;
@@ -828,8 +1127,15 @@ on("folderChips", "click", async (event) => {
     const folder = S.folders.find((f) => String(f.id) === id);
     if (!folder) return;
     if (act.dataset.folderAct === "rename") {
-      const name = prompt("新的文件夹名称：", folder.name);
-      if (!name || name.trim() === folder.name) return;
+      const name = await promptDialog("修改文件夹名称，不会影响其中的文献。", {
+        title: "重命名文件夹",
+        inputLabel: "文件夹名称",
+        input: folder.name,
+        placeholder: "输入文件夹名称",
+        maxLength: 100,
+        confirmLabel: "保存",
+      });
+      if (typeof name !== "string" || !name.trim() || name.trim() === folder.name) return;
       try {
         await api(`/api/folders/${folder.id}`, {
           method: "PUT",
@@ -841,7 +1147,11 @@ on("folderChips", "click", async (event) => {
       } catch (error) { toast(error.message, "err"); }
       return;
     }
-    if (!confirm(`删除文件夹「${folder.name}」？\n里面的论文不会被删除，会回到「未归档」。`)) return;
+    if (!await confirmDialog(`删除文件夹「${folder.name}」？\n里面的论文不会被删除，会回到「未归档」。`, {
+      title: "删除文件夹",
+      confirmLabel: "删除",
+      danger: true,
+    })) return;
     try {
       await api(`/api/folders/${folder.id}`, { method: "DELETE" });
       if (S.folderFilter === id) S.folderFilter = "";
@@ -857,7 +1167,13 @@ on("folderChips", "click", async (event) => {
 });
 
 on("folderNew", "click", async () => {
-  const name = prompt("新建文件夹名称，例如「SBA-15 系列」：");
+  const name = await promptDialog("新建文件夹用于归纳论文。", {
+    title: "新建文件夹",
+    inputLabel: "文件夹名称",
+    placeholder: "例如：SBA-15 系列",
+    maxLength: 100,
+    confirmLabel: "创建",
+  });
   if (!name || !name.trim()) return;
   try {
     await api("/api/folders", {
@@ -899,11 +1215,6 @@ function renderLibrary() {
   fill("done", "groupDone", "doneGrid", "doneCount");
   fill("failed", "groupFailed", "failedGrid", "failedCount");
 
-  // 卡片是字符串拼出来的，下拉选项在挂载后统一填充，保持说明文案单一来源
-  document.querySelectorAll("[data-mode]").forEach((select) => {
-    if (select.id !== "bulkMode") renderModeSelect(select);
-  });
-
   syncBulkBar();
 }
 
@@ -924,10 +1235,12 @@ function syncBulkBar() {
 
   const count = S.picked.size;
   $("bulkCount").textContent = `已选 ${count} 篇`;
+  $("bulkRunLabel").textContent = count ? `一键抽取 (${count})` : "一键抽取";
   $("bulkRun").disabled = count === 0;
+  $("bulkRun").closest(".bulk-run-dropdown").classList.toggle("disabled", count === 0);
+  if (!count) setPaperModeMenu($("bulkRun").closest(".bulk-run-dropdown"), false);
   $("bulkDelete").disabled = count === 0;
   $("bulkMove").disabled = count === 0;
-  $("bulkRun").textContent = count ? `一键抽取 (${count})` : "一键抽取";
   $("bulkDelete").textContent = count ? `一键删除 (${count})` : "一键删除";
   $("bulkMove").textContent = count ? `移动 (${count})` : "移动";
 
@@ -938,7 +1251,10 @@ function syncBulkBar() {
   const pending = visiblePapers().filter((p) => groupOf(p) === "pending").length;
   const btn = $("bulkRunPending");
   btn.disabled = pending === 0;
-  btn.textContent = pending ? `抽取全部待抽取 (${pending})` : "抽取全部待抽取";
+  $("bulkRunPendingLabel").textContent = pending
+    ? `抽取全部待抽取 (${pending})` : "抽取全部待抽取";
+  btn.closest(".bulk-run-dropdown").classList.toggle("disabled", pending === 0);
+  if (!pending) setPaperModeMenu(btn.closest(".bulk-run-dropdown"), false);
 }
 
 on("bulkMove", "click", async () => {
@@ -998,20 +1314,39 @@ async function runBatch(ids, mode) {
   } catch (error) { toast(error.message, "err"); }
 }
 
-on("bulkRun", "click", () =>
-  runBatch([...S.picked], $("bulkMode").value));
+on("bulkBar", "click", (event) => {
+  const trigger = event.target.closest("[data-bulk-run]");
+  if (trigger) {
+    if (trigger.disabled) return;
+    const wrapper = trigger.closest(".bulk-run-dropdown");
+    closePaperModeMenus(wrapper);
+    setPaperModeMenu(wrapper, true);
+    return;
+  }
 
-on("bulkRunPending", "click", () => {
-  // 跟随当前文件夹筛选，避免在某个文件夹里误触发全库抽取
-  const ids = visiblePapers().filter((p) => groupOf(p) === "pending").map((p) => p.id);
-  if (!ids.length) { toast("没有待抽取的论文", "warn"); return; }
-  runBatch(ids, $("bulkMode").value);
+  const option = event.target.closest(
+    '.paper-mode-option[data-act^="bulk-run-"]');
+  if (!option) return;
+  setPaperModeMenu(option.closest(".bulk-run-dropdown"), false);
+  if (option.dataset.act === "bulk-run-picked-mode") {
+    runBatch([...S.picked], option.dataset.mode);
+  } else {
+    const ids = visiblePapers()
+      .filter((p) => groupOf(p) === "pending")
+      .map((p) => p.id);
+    if (!ids.length) { toast("没有待抽取的论文", "warn"); return; }
+    runBatch(ids, option.dataset.mode);
+  }
 });
 
 on("bulkDelete", "click", async () => {
   const ids = [...S.picked];
   if (!ids.length) return;
-  if (!confirm(`删除选中的 ${ids.length} 篇论文及其全部抽取记录？此操作不可撤销。`)) return;
+  if (!await confirmDialog(`删除选中的 ${ids.length} 篇论文及其全部抽取记录？此操作不可撤销。`, {
+    title: "批量删除文献",
+    confirmLabel: "删除",
+    danger: true,
+  })) return;
   try {
     const result = await api("/api/papers/batch-delete", {
       method: "POST",
@@ -1034,19 +1369,18 @@ async function handleCardAction(event) {
   if (!card || !button) return;
   const id = Number(card.dataset.id);
 
-  if (button.dataset.act === "run") {
-    const mode = card.querySelector(`[data-mode="${id}"]`).value;
-    const meta = modeOf(mode);
-    try {
-      const job = await api("/api/jobs", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ paper_fk: id, mode }),
-      });
-      toast(`任务已创建（${meta ? meta.short : mode}），进度显示在“正在抽取”`);
-      await loadPapers();
-      pollJob(job.id);
-    } catch (error) { toast(error.message, "err"); }
+  if (button.dataset.act === "run-menu") {
+    const wrapper = button.closest(".paper-run-dropdown");
+    closePaperModeMenus(wrapper);
+    setPaperModeMenu(wrapper, true);
+    return;
+  }
+
+  if (button.dataset.act === "run-mode") {
+    const wrapper = button.closest(".paper-run-dropdown");
+    setPaperModeMenu(wrapper, false);
+    startPaperExtraction(id, button.dataset.mode);
+    return;
   }
 
   if (button.dataset.act === "open") {
@@ -1066,7 +1400,11 @@ async function handleCardAction(event) {
 
   if (button.dataset.act === "del") {
     const paper = S.papers.find((p) => p.id === id);
-    if (!confirm(`删除「${paper ? paper.paper_key : id}」及其全部抽取记录？`)) return;
+    if (!await confirmDialog(`删除「${paper ? paper.paper_key : id}」及其全部抽取记录？`, {
+      title: "删除文献",
+      confirmLabel: "删除",
+      danger: true,
+    })) return;
     await api(`/api/papers/${id}`, { method: "DELETE" });
     if (S.paper && S.paper.id === id) { S.paper = null; renderFields(); }
     toast("已删除");
@@ -1076,10 +1414,13 @@ async function handleCardAction(event) {
 }
 
 ["doneGrid", "pendingGrid", "failedGrid"].forEach((id) => {
-  $(id).addEventListener("click", handleCardAction);
-  $(id).addEventListener("change", handlePickChange);
-  bindBriefHover($(id));
+  const grid = $(id);
+  grid.addEventListener("click", handleCardAction);
+  grid.addEventListener("change", handlePickChange);
+  bindModeMenuEvents(grid);
+  bindBriefHover(grid);
 });
+bindModeMenuEvents($("bulkBar"));
 
 /* ------------------------------------------------------------------ */
 /* 自定义命名与备注                                                     */
@@ -1336,44 +1677,60 @@ async function postPaper(file, allowDuplicate) {
   return api(path, { method: "POST", body: form });
 }
 
+let activeUploadBatches = 0;
+
+function setUploadBusy(busy) {
+  activeUploadBatches = Math.max(0, activeUploadBatches + (busy ? 1 : -1));
+  const zone = $("uploadZone");
+  const status = $("uploadStatus");
+  const isBusy = activeUploadBatches > 0;
+  status.hidden = !isBusy;
+  zone.classList.toggle("loading", isBusy);
+}
+
 async function uploadFiles(files) {
   let bulkChoice = null;   // 勾选「剩余都按此处理」后记住的决定
   let skipped = 0;
 
-  for (let i = 0; i < files.length; i++) {
-    const file = files[i];
-    try {
-      const paper = await postPaper(file, false);
-      toast(`${paper.paper_key} 已解析：${paper.pages} 页，可在“待抽取”中启动任务`);
-    } catch (error) {
-      if (error.code !== "duplicate_paper") {
-        toast(`${file.name}：${error.message}`, "err");
-        continue;
-      }
-
-      let choice = bulkChoice;
-      if (!choice) {
-        const answer = await askDuplicate(error.payload, files.length - i - 1);
-        choice = answer.choice;
-        if (answer.applyAll) bulkChoice = choice;
-      }
-
-      if (choice === "skip") {
-        skipped += 1;
-        continue;
-      }
+  setUploadBusy(true);
+  try {
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
       try {
-        const paper = await postPaper(file, true);
-        toast(`${paper.paper_key} 已重复上传：${paper.pages} 页`, "warn");
-      } catch (retryError) {
-        toast(`${file.name}：${retryError.message}`, "err");
+        const paper = await postPaper(file, false);
+        toast(`${paper.paper_key} 已解析：${paper.pages} 页，可在“待抽取”中启动任务`);
+      } catch (error) {
+        if (error.code !== "duplicate_paper") {
+          toast(`${file.name}：${error.message}`, "err");
+          continue;
+        }
+
+        let choice = bulkChoice;
+        if (!choice) {
+          const answer = await askDuplicate(error.payload, files.length - i - 1);
+          choice = answer.choice;
+          if (answer.applyAll) bulkChoice = choice;
+        }
+
+        if (choice === "skip") {
+          skipped += 1;
+          continue;
+        }
+        try {
+          const paper = await postPaper(file, true);
+          toast(`${paper.paper_key} 已重复上传：${paper.pages} 页`, "warn");
+        } catch (retryError) {
+          toast(`${file.name}：${retryError.message}`, "err");
+        }
       }
     }
-  }
 
-  if (skipped) toast(`已跳过 ${skipped} 个重复文献`, "warn");
-  await loadPapers();
-  await loadStatus();
+    if (skipped) toast(`已跳过 ${skipped} 个重复文献`, "warn");
+    await loadPapers();
+    await loadStatus();
+  } finally {
+    setUploadBusy(false);
+  }
 }
 
 /** 需要登录的操作统一走这里：未登录时提示并弹出登录框。 */
@@ -1452,10 +1809,7 @@ function applyPreset(id) {
   const preset = (S.settings.presets || []).find((p) => p.id === id);
   if (!preset) return;
   $("providerHint").textContent = preset.hint || "";
-  if (preset.id === "custom") {
-    $("settingAdv").open = true;
-    return;
-  }
+  if (preset.id === "custom") return;
   $("settingBaseUrl").value = preset.base_url;
   $("settingModel").value = preset.model;
 }
@@ -1532,7 +1886,11 @@ on("profileList", "click", async (event) => {
   }
 
   if (button.dataset.profileAct === "del") {
-    if (!confirm("从历史记录中删除这个配置？当前正在使用的设置不会改变。")) return;
+    if (!await confirmDialog("从历史记录中删除这个配置？当前正在使用的设置不会改变。", {
+      title: "删除 AI 配置",
+      confirmLabel: "删除",
+      danger: true,
+    })) return;
     try {
       const result = await api(`/api/settings/llm/profiles/${encodeURIComponent(id)}`, {
         method: "DELETE",
@@ -1645,7 +2003,11 @@ on("settingSave", "click", () =>
   }));
 
 on("settingClear", "click", async () => {
-  if (!confirm("清除已保存的密钥？之后抽取会改用离线关键词规则。")) return;
+  if (!await confirmDialog("清除已保存的密钥？之后抽取会改用离线关键词规则。", {
+    title: "清除 AI 密钥",
+    confirmLabel: "清除密钥",
+    danger: true,
+  })) return;
   try {
     const result = await api("/api/settings/llm", { method: "DELETE" });
     S.settings = result.settings;
@@ -1755,7 +2117,10 @@ on("paperSwitch", "click", async (event) => {
   hideBrief();
   const id = Number(card.dataset.id);
   if (S.paper && S.paper.id === id) return;
-  if (S.dirty.size && !confirm("当前记录有未保存的修改，切换会丢失。继续？")) return;
+  if (S.dirty.size && !await confirmDialog("当前记录有未保存的修改，切换会丢失。继续？", {
+    title: "放弃未保存的修改",
+    confirmLabel: "继续切换",
+  })) return;
   await openPaper(id);
 });
 
@@ -1769,13 +2134,13 @@ function renderAskScope() {
     : "全部论文（共享语料）";
   const folders = S.folders.length
     ? `<optgroup label="按文件夹">` + S.folders
-        .map((f) => `<option value="folder:${f.id}">📁 ${esc(f.name)}（${f.n_papers} 篇）</option>`)
-        .join("") + "</optgroup>"
+      .map((f) => `<option value="folder:${f.id}">📁 ${esc(f.name)}（${f.n_papers} 篇）</option>`)
+      .join("") + "</optgroup>"
     : "";
   const papers = S.papers.length
     ? `<optgroup label="单篇论文">` + S.papers
-        .map((p) => `<option value="${p.id}">${esc(p.paper_key)} · ${esc(p.title)}</option>`)
-        .join("") + "</optgroup>"
+      .map((p) => `<option value="${p.id}">${esc(p.paper_key)} · ${esc(p.title)}</option>`)
+      .join("") + "</optgroup>"
     : "";
   scope.innerHTML = `<option value="">${esc(shared)}</option>` + folders + papers;
   if (current && [...scope.options].some((o) => o.value === current)) scope.value = current;
@@ -1896,10 +2261,13 @@ function renderRecordTabs() {
              data-i="${i}">样品 ${r.record_index}</button>`).join("");
 }
 
-on("recordTabs", "click", (event) => {
+on("recordTabs", "click", async (event) => {
   const tab = event.target.closest(".record-tab");
   if (!tab) return;
-  if (S.dirty.size && !confirm("当前记录有未保存的修改，切换会丢失。继续？")) return;
+  if (S.dirty.size && !await confirmDialog("当前记录有未保存的修改，切换会丢失。继续？", {
+    title: "放弃未保存的修改",
+    confirmLabel: "继续切换",
+  })) return;
   S.recordIndex = Number(tab.dataset.i);
   S.dirty.clear();
   renderRecordTabs();
@@ -2062,7 +2430,7 @@ async function renderPageImage() {
       const response = await fetch(src, { credentials: "same-origin" });
       if (!response.ok) {
         let reason = `HTTP ${response.status}`;
-        try { reason = (await response.json()).error || reason; } catch (_) {}
+        try { reason = (await response.json()).error || reason; } catch (_) { }
         if (response.status === 404 || response.status === 405) {
           reason += "（若反复出现，多半是后端跑的是旧版代码，请在项目目录重启服务）";
         }
@@ -2130,7 +2498,7 @@ function tableHtml(table) {
       <table class="page-table">
         <thead><tr>${header.map((c) => `<th>${esc(c)}</th>`).join("")}</tr></thead>
         <tbody>${body.map((row) =>
-          `<tr>${row.map((c) => `<td>${esc(c)}</td>`).join("")}</tr>`).join("")}</tbody>
+    `<tr>${row.map((c) => `<td>${esc(c)}</td>`).join("")}</tr>`).join("")}</tbody>
       </table>
     </div>`;
 }
@@ -2181,7 +2549,7 @@ async function loadTranslateProviders() {
   try {
     const data = await api("/api/translate/providers");
     let saved = null;
-    try { saved = localStorage.getItem(PROVIDER_KEY); } catch (_) {}
+    try { saved = localStorage.getItem(PROVIDER_KEY); } catch (_) { }
     select.innerHTML = (data.providers || []).map((p) =>
       `<option value="${esc(p.id)}" title="${esc(p.note)}" ${p.ready ? "" : "disabled"}>
         ${esc(p.label)}${p.ready ? "" : "（未配置）"}
@@ -2196,7 +2564,7 @@ async function loadTranslateProviders() {
 
 on("translateProvider", "change", (event) => {
   S.translateProvider = event.target.value;
-  try { localStorage.setItem(PROVIDER_KEY, S.translateProvider); } catch (_) {}
+  try { localStorage.setItem(PROVIDER_KEY, S.translateProvider); } catch (_) { }
   // 换了服务，之前的译文缓存不再适用
   S.zhCache.clear();
   if (S.pageView === "zh") showPage(S.page, S.highlight);
@@ -2217,7 +2585,7 @@ function syncPageView() {
   }
   document.querySelectorAll("[data-pageview]").forEach((button) =>
     button.classList.toggle("active", button.dataset.pageview === S.pageView));
-  try { localStorage.setItem(PAGE_VIEW_KEY, S.pageView); } catch (_) {}
+  try { localStorage.setItem(PAGE_VIEW_KEY, S.pageView); } catch (_) { }
 }
 
 /* ---- 中文视图：整页译文 ---- */
@@ -2292,7 +2660,7 @@ on("evidenceTranslate", "click", async () => {
 
 (function initPageView() {
   let saved = null;
-  try { saved = localStorage.getItem(PAGE_VIEW_KEY); } catch (_) {}
+  try { saved = localStorage.getItem(PAGE_VIEW_KEY); } catch (_) { }
   if (saved === "text" || saved === "image" || saved === "zh") S.pageView = saved;
   syncPageView();
 })();
@@ -2345,7 +2713,7 @@ const SPLIT_KEY = "cheminfo-split";
   };
 
   let saved = null;
-  try { saved = parseFloat(localStorage.getItem(SPLIT_KEY)); } catch (_) {}
+  try { saved = parseFloat(localStorage.getItem(SPLIT_KEY)); } catch (_) { }
   apply(Number.isFinite(saved) ? saved : 0.5);
 
   let dragging = false;
@@ -2363,20 +2731,20 @@ const SPLIT_KEY = "cheminfo-split";
     if (!dragging) return;
     dragging = false;
     bar.classList.remove("dragging");
-    try { localStorage.setItem(SPLIT_KEY, String(S.splitRatio)); } catch (_) {}
+    try { localStorage.setItem(SPLIT_KEY, String(S.splitRatio)); } catch (_) { }
   };
   bar.addEventListener("pointerup", stop);
   bar.addEventListener("pointercancel", stop);
   bar.addEventListener("dblclick", () => {
     apply(0.5);
-    try { localStorage.setItem(SPLIT_KEY, "0.5"); } catch (_) {}
+    try { localStorage.setItem(SPLIT_KEY, "0.5"); } catch (_) { }
   });
   // 键盘可达：左右方向键微调
   bar.addEventListener("keydown", (event) => {
     if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
     event.preventDefault();
     apply(S.splitRatio + (event.key === "ArrowLeft" ? -0.03 : 0.03));
-    try { localStorage.setItem(SPLIT_KEY, String(S.splitRatio)); } catch (_) {}
+    try { localStorage.setItem(SPLIT_KEY, String(S.splitRatio)); } catch (_) { }
   });
 })();
 
@@ -2392,7 +2760,7 @@ async function readStream(path, body, handlers = {}) {
   });
   if (!response.ok || !response.body) {
     let detail = `HTTP ${response.status}`;
-    try { detail = (await response.json()).error || detail; } catch (_) {}
+    try { detail = (await response.json()).error || detail; } catch (_) { }
     throw new Error(detail);
   }
 
@@ -2492,7 +2860,7 @@ on("regionClose", "click", () => { $("regionResult").hidden = true; });
       h: Math.abs(end.y - start.y),
     };
     start = null;
-    try { canvas.releasePointerCapture(event.pointerId); } catch (_) {}
+    try { canvas.releasePointerCapture(event.pointerId); } catch (_) { }
 
     if (rect.w < 0.01 || rect.h < 0.005) {
       box.hidden = true;
@@ -2620,7 +2988,10 @@ on("historyList", "click", async (event) => {
   if (!button) return;
   const record = currentRecord();
   if (!record) return;
-  if (S.dirty.size && !confirm("当前有未保存的修改，撤销会重新加载字段。继续？")) return;
+  if (S.dirty.size && !await confirmDialog("当前有未保存的修改，撤销会重新加载字段。继续？", {
+    title: "放弃未保存的修改",
+    confirmLabel: "继续撤销",
+  })) return;
   try {
     const updated = await api(`/api/records/${record.id}/revert`, {
       method: "POST",
@@ -2900,6 +3271,54 @@ on("jobTable", "click", async (event) => {
 
 /* AI 助手已独立为首页视图，范围选择与对话区都在 #view-ask 内 */
 
+function resetAskHistory() {
+  const body = $("askBody");
+  if (!body) return;
+  body.querySelectorAll(".ask-msg:not([data-chat-welcome])").forEach((message) => message.remove());
+}
+
+function chatCitationsHtml(citations) {
+  return (citations || []).map((citation) => {
+    const own = paperFkOf(citation.paper_key);
+    const shared = citation.shared || !own;
+    return `
+      <div class="cite ${shared ? "shared" : ""}" data-paper="${own}" data-page="${citation.page}"
+           data-quote="${esc(citation.quote)}">
+        <b>${esc(citation.paper_key)} · p.${citation.page}</b>
+        ${citation.title ? `<span class="cite-title">${esc(citation.title)}</span>` : ""}
+        ${shared ? '<span class="cite-tag">共享语料</span>' : ""}
+        <br/>${esc(citation.quote)}
+      </div>`;
+  }).join("");
+}
+
+function renderChatTurn(turn) {
+  const body = $("askBody");
+  const citations = chatCitationsHtml(turn.citations);
+  const corpus = turn.corpus_papers
+    ? ` · 本次检索覆盖 ${turn.corpus_papers} 篇论文` : "";
+  const engine = turn.engine === "llm" ? "AI + 检索" : "检索（抽取式）";
+  body.insertAdjacentHTML("beforeend", `
+    <div class="ask-msg user">${esc(turn.question)}</div>
+    <div class="ask-msg bot">
+      <p>${answerHtml(turn.answer || "")}</p>
+      ${citations ? `<div class="cite-list">${citations}</div>` : ""}
+      ${turn.notice ? `<p class="muted">${esc(turn.notice)}</p>` : ""}
+      <p class="muted">回答引擎：${engine}${corpus} · 点击自己库中的引文可跳转原文</p>
+    </div>`);
+}
+
+async function loadChatHistory() {
+  resetAskHistory();
+  try {
+    const data = await api("/api/chat/history");
+    (data.turns || []).forEach(renderChatTurn);
+    $("askBody").scrollTop = $("askBody").scrollHeight;
+  } catch (error) {
+    toast(`读取聊天记录失败：${error.message}`, "err");
+  }
+}
+
 on("askScope", "change", () => {
   // 下拉和多选互斥：改下拉即放弃之前的勾选
   if (S.askPicked.size) {
@@ -2950,39 +3369,39 @@ on("askForm", "submit", async (event) => {
     let meta = { citations: [], corpus_papers: 0 };
     let engine = "retrieval";
     let notice = "";
+    let paintFrame = 0;
+    let pendingStreaming = true;
 
-    const renderCitations = () => (meta.citations || []).map((c) => {
-      const own = paperFkOf(c.paper_key);
-      const shared = c.shared || !own;
-      return `
-      <div class="cite ${shared ? "shared" : ""}" data-paper="${own}" data-page="${c.page}"
-           data-quote="${esc(c.quote)}">
-        <b>${esc(c.paper_key)} · p.${c.page}</b>
-        ${c.title ? `<span class="cite-title">${esc(c.title)}</span>` : ""}
-        ${shared ? '<span class="cite-tag">共享语料</span>' : ""}
-        <br/>${esc(c.quote)}
-      </div>`;
-    }).join("");
-
-    const paint = (streaming) => {
+    const renderPending = () => {
+      paintFrame = 0;
       const corpus = meta.corpus_papers
         ? ` · 本次检索覆盖 ${meta.corpus_papers} 篇论文` : "";
-      const cites = renderCitations();
+      const cites = chatCitationsHtml(meta.citations);
       pending.innerHTML = `
         <p>${answer ? answerHtml(answer) : '<span class="typing"><i></i><i></i><i></i></span>'}</p>
         ${cites ? `<div class="cite-list">${cites}</div>` : ""}
         ${notice ? `<p class="muted">${esc(notice)}</p>` : ""}
-        ${streaming ? "" : `<p class="muted">回答引擎：${esc(engine === "llm" ? "AI + 检索" : "检索（抽取式）")}${corpus} · 点击自己库中的引文可跳转原文</p>`}`;
+        ${pendingStreaming ? "" : `<p class="muted">回答引擎：${esc(engine === "llm" ? "AI + 检索" : "检索（抽取式）")}${corpus} · 点击自己库中的引文可跳转原文</p>`}`;
       body.scrollTop = body.scrollHeight;
+    };
+
+    const paint = (streaming, immediate = false) => {
+      pendingStreaming = streaming;
+      if (immediate) {
+        if (paintFrame) cancelAnimationFrame(paintFrame);
+        renderPending();
+      } else if (!paintFrame) {
+        paintFrame = requestAnimationFrame(renderPending);
+      }
     };
 
     await readStream("/api/ask/stream", payload, {
       meta: (data) => { meta = data; paint(true); },
       delta: (data) => { answer += data.text || ""; paint(true); },
       notice: (data) => { notice = data.text || ""; },
-      done: (data) => { engine = data.engine || engine; paint(false); },
+      done: (data) => { engine = data.engine || engine; paint(false, true); },
     });
-    if (!answer) paint(false);
+    paint(false, true);
   } catch (error) {
     pending.innerHTML = `<p>出错了：${esc(error.message)}</p>`;
   }
@@ -3008,6 +3427,7 @@ async function bootData() {
   await loadStatus();
   await loadTranslateProviders();
   await loadPapers();
+  await loadChatHistory();
   renderAccountCard();
   // AI 助手是首页；提取结果视图仍预载一篇，切过去即有内容
   if (S.papers.length) {
