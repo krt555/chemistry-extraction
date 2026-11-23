@@ -901,9 +901,69 @@ async def api_translate_region(
         result = translate_text(source, body.get("provider"))
     except TranslateError as exc:
         raise HTTPException(400, str(exc)) from exc
+    created_at = now()
+    translation_id = db.execute(
+        """
+        INSERT INTO region_translations
+            (paper_fk, page, rect_json, source, translated_text, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (paper_fk, page, dumps(rect), source, result["text"], created_at),
+    )
     result["source"] = source
     result["page"] = page
+    result["id"] = translation_id
+    result["paper_fk"] = paper_fk
+    result["paper_key"] = row["paper_key"]
+    result["paper_title"] = row["title"]
+    result["filename"] = row["filename"]
+    result["rect"] = rect
+    result["created_at"] = created_at
     return result
+
+
+@app.get("/api/translate-region/history")
+def api_translate_region_history(
+    request: Request,
+    paper_fk: int | None = Query(None, description="仅查看指定文献的框选翻译记录"),
+) -> dict[str, Any]:
+    """List the signed-in user's saved region translations."""
+    user = current_user(request)
+    if paper_fk is not None:
+        _owned_paper_row(paper_fk, user)
+    params: tuple[Any, ...] = (user["id"],)
+    paper_filter = ""
+    if paper_fk is not None:
+        paper_filter = " AND t.paper_fk = ?"
+        params += (paper_fk,)
+    rows = db.query(
+        f"""
+        SELECT t.id, t.paper_fk, t.page, t.rect_json, t.source, t.translated_text,
+               t.created_at, p.paper_key, p.title AS paper_title, p.filename
+        FROM region_translations AS t
+        JOIN papers AS p ON p.id = t.paper_fk
+        WHERE p.owner_fk = ?{paper_filter}
+        ORDER BY t.id DESC
+        """,
+        params,
+    )
+    return {
+        "translations": [
+            {
+                "id": row["id"],
+                "paper_fk": row["paper_fk"],
+                "page": row["page"],
+                "rect": loads(row["rect_json"], {}),
+                "source": row["source"],
+                "translated_text": row["translated_text"],
+                "created_at": row["created_at"],
+                "paper_key": row["paper_key"],
+                "paper_title": row["paper_title"],
+                "filename": row["filename"],
+            }
+            for row in rows
+        ]
+    }
 
 
 @app.post("/api/papers")

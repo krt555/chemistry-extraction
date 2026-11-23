@@ -19,6 +19,7 @@ REQUIRED_ROUTES = (
     ("/api/papers/{paper_fk}/pages/{page}/locate", "引文坐标定位"),
     ("/api/papers/{paper_fk}/pages/{page}/translate", "整页翻译"),
     ("/api/papers/{paper_fk}/pages/{page}/translate-region", "框选翻译"),
+    ("/api/translate-region/history", "框选翻译记录"),
     ("/api/ask/stream", "问答流式输出"),
     ("/api/translate/stream", "翻译流式输出"),
 )

@@ -286,6 +286,12 @@
         <!-- 文件夹：按研究主题归纳论文，点击可筛选 -->
         <div class="folder-bar" id="folderBar">
           <div class="folder-chips" id="folderChips"></div>
+          <div class="library-view-toggle" id="libraryViewToggle" role="group" aria-label="文献显示模式">
+            <button type="button" class="btn sm" data-library-mode="cards"
+              aria-pressed="true" title="卡片模式">卡片</button>
+            <button type="button" class="btn sm" data-library-mode="list"
+              aria-pressed="false" title="列表模式">列表</button>
+          </div>
           <button class="btn sm" id="folderNew" title="新建一个文件夹用于归纳论文">＋ 新建文件夹</button>
         </div>
 
@@ -381,31 +387,40 @@
             <div class="panel-head">
               <span>原文定位</span>
               <div class="page-nav">
+                <div class="page-tools" id="pageTools">
+                  <div class="page-tool-group zoom-tool-group" role="group" aria-label="页面缩放">
+                    <button class="icon-btn" id="zoomOut" title="缩小">－</button>
+                    <span id="zoomLabel">100%</span>
+                    <button class="icon-btn" id="zoomIn" title="放大">＋</button>
+                  </div>
+                  <div class="translation-tools-dropdown">
+                    <button class="btn sm translation-tools-trigger" id="translationToolsToggle"
+                      type="button" aria-haspopup="menu" aria-expanded="false"
+                      aria-controls="translationToolsPopover">
+                      框选翻译<span class="paper-run-caret" aria-hidden="true">▾</span>
+                    </button>
+                    <div class="translation-tools-popover" id="translationToolsPopover"
+                      role="menu" hidden>
+                      <button class="tool-item" id="regionMode" type="button" role="menuitem"
+                        title="开启后在页面上拖出一个区域，只翻译该区域">▭ 框选</button>
+                      <button class="tool-item" id="regionHistoryToggle" type="button"
+                        role="menuitem" aria-expanded="false">翻译记录</button>
+                      <button class="tool-item" id="translateProviderToggle" type="button"
+                        role="menuitem" aria-expanded="false">模型选择</button>
+                      <div class="translate-provider-panel" id="translateProviderPanel" hidden>
+                        <label for="translateProvider">翻译服务</label>
+                        <select class="select tiny-select" id="translateProvider"
+                          title="选择翻译服务；没有 AI 密钥时可用免费的 MyMemory"></select>
+                      </div>
+                    </div>
+                  </div>
+                </div>
                 <!-- 原版 = PDF 实际版面（含图表）；文本 = 可复制的纯文字 -->
                 <div class="view-toggle" id="pageViewToggle" role="group" aria-label="原文显示方式">
                   <button class="view-toggle-btn active" data-pageview="image"
                     title="显示 PDF 原始版面，图表、公式、分栏都和原文一致">原版</button>
                   <button class="view-toggle-btn" data-pageview="text" title="显示纯文字，便于复制数值和逐字核对">文本</button>
                   <button class="view-toggle-btn" data-pageview="zh" title="把本页英文正文翻译成中文">中文</button>
-                </div>
-                <!-- 次要工具收进「更多」，避免挤占翻页按钮的位置 -->
-                <div class="tool-menu" id="toolMenu">
-                  <button class="icon-btn" id="toolMenuBtn" title="更多工具" aria-haspopup="true"
-                    aria-expanded="false">⋯</button>
-                  <div class="tool-popover" id="toolPopover" hidden>
-                    <button class="tool-item" id="regionMode" title="开启后在页面上拖出一个区域，只翻译该区域">▭ 框选翻译</button>
-                    <div class="tool-row">
-                      <span>缩放</span>
-                      <button class="icon-btn" id="zoomOut" title="缩小">－</button>
-                      <span id="zoomLabel">100%</span>
-                      <button class="icon-btn" id="zoomIn" title="放大">＋</button>
-                    </div>
-                    <div class="tool-row">
-                      <span>翻译服务</span>
-                      <select class="select tiny-select" id="translateProvider"
-                        title="选择翻译服务；没有 AI 密钥时可用免费的 MyMemory"></select>
-                    </div>
-                  </div>
                 </div>
                 <button class="icon-btn" id="pagePrev" title="上一页">‹</button>
                 <span id="pageLabel">— / —</span>
@@ -440,7 +455,6 @@
               </div>
               <div class="region-body" id="regionBody"></div>
             </div>
-
             <!-- 文本视图：纯文字 + 结构化表格 -->
             <div class="page-text" id="pageText" hidden>
               <div class="placeholder">在右侧点击任意字段，这里会跳转到证据所在页并高亮引文。</div>
@@ -453,8 +467,21 @@
           </div>
           <!-- 拖动调整左右占比 -->
           <div class="workbench-split" id="workbenchSplit" role="separator" aria-orientation="vertical" tabindex="0"
-            title="拖动调整左右宽度；双击复位"></div>
+            title="拖动调整左右宽度"></div>
           <div class="panel field-panel">
+            <section class="region-history" id="regionHistory" hidden>
+              <div class="region-history-head">
+                <strong>翻译记录</strong>
+                <div>
+                  <select class="select tiny-select" id="regionHistoryScope" aria-label="翻译记录范围">
+                    <option value="all">所有文献</option>
+                    <option value="current">当前文献</option>
+                  </select>
+                  <button class="icon-btn" id="regionHistoryClose" title="收起翻译记录">×</button>
+                </div>
+              </div>
+              <div class="region-history-list" id="regionHistoryList"></div>
+            </section>
             <div class="panel-head">
               <span>抽取记录</span>
               <div class="panel-head-tools">
@@ -487,6 +514,17 @@
               <button class="btn primary" id="saveRecord">保存修改</button>
             </div>
           </div>
+          <div class="region-history-split" id="regionHistorySplit" role="separator"
+            aria-orientation="horizontal" aria-label="调整翻译记录高度" tabindex="0"
+            title="拖动调整翻译记录高度" hidden></div>
+          <div class="workbench-cross-handle" id="workbenchCrossHandle" role="button" tabindex="0"
+            aria-label="同时调整两侧栏宽度和翻译记录高度" title="拖动同时调整宽度和高度" hidden></div>
+          <div class="region-result-split" id="regionResultSplit" role="separator"
+            aria-orientation="horizontal" aria-label="调整框选翻译结果高度" tabindex="0"
+            title="拖动调整框选翻译结果高度" hidden></div>
+          <div class="workbench-cross-handle workbench-result-cross-handle" id="workbenchResultCrossHandle"
+            role="button" tabindex="0" aria-label="同时调整左右栏宽度和框选翻译结果高度"
+            title="拖动同时调整宽度和结果栏高度" hidden></div>
         </div>
       </section>
 

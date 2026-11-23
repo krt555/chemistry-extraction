@@ -33,6 +33,15 @@ const S = {
   sharedPapers: 0,      // 全库共享语料规模，用于问答页提示
 };
 
+const LIBRARY_VIEW_KEY = "mesoscope-library-view";
+let libraryViewMode = "cards";
+let regionHistoryItems = [];
+let regionHistoryRequest = 0;
+try {
+  const savedLibraryView = localStorage.getItem(LIBRARY_VIEW_KEY);
+  if (savedLibraryView === "list") libraryViewMode = savedLibraryView;
+} catch (_) { }
+
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -126,7 +135,7 @@ document.addEventListener("keydown", (event) => {
     event.stopImmediatePropagation();
     cancelAppDialog();
   } else if (event.key === "Enter" && appDialogMode === "prompt"
-      && event.target === $("appDialogInput")) {
+    && event.target === $("appDialogInput")) {
     event.preventDefault();
     event.stopImmediatePropagation();
     closeAppDialog($("appDialogInput").value);
@@ -317,6 +326,12 @@ function clearSessionState() {
   S.user = null;
   S.papers = [];
   S.paper = null;
+  regionHistoryItems = [];
+  regionHistoryRequest += 1;
+  $("regionHistory").hidden = true;
+  $("regionHistoryToggle").setAttribute("aria-expanded", "false");
+  $("regionHistoryList").innerHTML = "";
+  $("regionResult").hidden = true;
   resetAskHistory();
   S.picked.clear();
   S.pageCache.clear();
@@ -735,7 +750,7 @@ async function startPaperExtraction(paperFk, mode) {
     return;
   }
   const trigger = document.querySelector(
-    `.paper-card[data-id="${paperFk}"] [data-act="run-menu"]`);
+    `.paper-item[data-id="${paperFk}"] [data-act="run-menu"]`);
   if (trigger && trigger.disabled) return;
   if (trigger) trigger.disabled = true;
   try {
@@ -754,7 +769,7 @@ async function startPaperExtraction(paperFk, mode) {
 }
 
 function setPaperModeMenu(wrapper, open) {
-  const card = wrapper.closest(".paper-card");
+  const card = wrapper.closest(".paper-item");
   const trigger = wrapper.querySelector(".paper-run-trigger, .bulk-run-trigger");
   if (open && trigger.disabled) return;
   wrapper.classList.toggle("open", open);
@@ -764,8 +779,23 @@ function setPaperModeMenu(wrapper, open) {
     const menu = wrapper.querySelector(".paper-mode-menu");
     wrapper.classList.toggle("open-up",
       window.innerHeight - trigger.getBoundingClientRect().bottom < menu.offsetHeight + 12);
+    if (card && card.classList.contains("paper-row")) {
+      const rect = trigger.getBoundingClientRect();
+      const left = Math.max(12, Math.min(
+        window.innerWidth - menu.offsetWidth - 12, rect.left));
+      const openUp = wrapper.classList.contains("open-up");
+      menu.style.position = "fixed";
+      menu.style.left = `${left}px`;
+      menu.style.top = openUp ? "auto" : `${rect.bottom}px`;
+      menu.style.bottom = openUp ? `${window.innerHeight - rect.top}px` : "auto";
+    }
   } else {
     wrapper.classList.remove("open-up");
+    const menu = wrapper.querySelector(".paper-mode-menu");
+    menu.style.position = "";
+    menu.style.left = "";
+    menu.style.top = "";
+    menu.style.bottom = "";
   }
 }
 
@@ -978,7 +1008,7 @@ function paperCardHtml(paper, group) {
   const job = paper.latest_job;
   const picked = S.picked.has(paper.id);
   return `
-  <div class="paper-card ${picked ? "picked" : ""}" data-id="${paper.id}">
+  <div class="paper-card paper-item ${picked ? "picked" : ""}" data-id="${paper.id}">
     <div class="paper-top">
       <div>
         <label class="paper-pick">
@@ -1010,7 +1040,7 @@ function paperCardHtml(paper, group) {
     <div class="paper-dims">
       <span>${paper.pages} 页</span><span>${paper.n_tables} 表</span>
       <span>${(paper.chars / 1000).toFixed(1)}k 字符</span>
-      ${paper.n_records ? `<span>提取结果 ${paper.n_reviewed}/${paper.n_records} 已复核</span>` : ""}
+      ${paper.n_records ? `<span>提取结果已复核 ${paper.n_reviewed}/${paper.n_records}</span>` : ""}
       ${paper.summary ? '<span class="paper-has-summary">已有总结</span>' : ""}
     </div>
     ${group === "failed" && job ? `<div class="paper-err">${esc(job.message || "未知错误")}</div>` : ""}
@@ -1026,9 +1056,86 @@ function paperCardHtml(paper, group) {
       </div>
       <button class="btn sm paper-summary-button" data-act="summary"
         title="${paper.summary ? "查看抽取时自动生成的内容总结" : "该论文还没有总结：运行抽取会自动生成，也可点此立即生成"}"
-        >内容总结${paper.summary ? "" : "（未生成）"}</button>
+        >${paper.summary ? "内容总结" : "生成内容总结"}</button>
     </div>
   </div>`;
+}
+
+function paperRowHtml(paper, group) {
+  const job = paper.latest_job;
+  const picked = S.picked.has(paper.id);
+  return `
+    <tr class="paper-row paper-item ${picked ? "picked" : ""}" data-id="${paper.id}">
+      <td class="library-paper-id">
+        <input type="checkbox" data-pick="${paper.id}" ${picked ? "checked" : ""}
+          aria-label="选择 ${esc(paper.paper_key)}" />
+        <span class="paper-key">${esc(paper.paper_key)}</span>
+      </td>
+      <td class="library-paper-title">
+        <div class="library-paper-title-line">
+          <button type="button" class="paper-title-link" data-act="open" data-brief="${paper.id}"
+            title="${esc(paper.title)}" ${paper.n_records ? "" : "disabled"}>
+            ${esc(paper.title)}
+          </button>
+          <button type="button" class="paper-rename-icon" data-act="rename"
+            title="编辑文献名称与备注" aria-label="编辑文献名称与备注">
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M10.8 2.8a1.8 1.8 0 0 1 2.5 2.5l-7.7 7.8-3.4.8.8-3.4Z"/>
+              <path d="m9.5 4.1 2.5 2.5"/>
+            </svg>
+          </button>
+        </div>
+        ${paper.renamed ? '<span class="paper-renamed" title="已自定义命名">已命名</span>' : ""}
+        ${paper.note ? `<div class="library-paper-note" title="${esc(paper.note)}">${esc(paper.note)}</div>` : ""}
+        ${group === "failed" && job
+      ? `<div class="paper-err">${esc(job.message || "未知错误")}</div>` : ""}
+      </td>
+      <td class="library-paper-status">${statusBadge(job, paper)}</td>
+      <td class="library-paper-details">
+        <span>${paper.pages} 页</span>
+        <span>${paper.n_tables} 表</span>
+        <span>${(paper.chars / 1000).toFixed(1)}k 字符</span>
+        ${paper.n_records
+      ? `<span>提取结果已复核 ${paper.n_reviewed}/${paper.n_records}</span>` : ""}
+        ${paper.summary ? '<span class="paper-has-summary">已有总结</span>' : ""}
+      </td>
+      <td class="library-paper-actions">
+        <div class="paper-actions table-paper-actions">
+          <div class="paper-run-dropdown">
+            <button type="button" class="btn sm paper-run-trigger" data-act="run-menu"
+              aria-haspopup="menu" aria-expanded="false" aria-controls="paper-mode-menu-${paper.id}">
+              ${group === "done" ? "重抽" : "抽取"}<span class="paper-run-caret" aria-hidden="true">▾</span>
+            </button>
+            <div class="paper-mode-menu" id="paper-mode-menu-${paper.id}" role="menu">
+              ${paperModeOptionsHtml()}
+            </div>
+          </div>
+          <button class="btn sm paper-summary-button" data-act="summary"
+            title="${paper.summary ? "查看抽取时自动生成的内容总结" : "该论文还没有总结：运行抽取会自动生成，也可点此立即生成"}"
+            >${paper.summary ? "内容总结" : "生成内容总结"}</button>
+          <button type="button" class="paper-delete" data-act="del"
+            title="删除文献" aria-label="删除文献">×</button>
+        </div>
+      </td>
+    </tr>`;
+}
+
+function paperTableHtml(papers, group) {
+  return `
+    <div class="library-table-wrap">
+      <table class="library-table">
+        <thead>
+          <tr>
+            <th class="library-paper-id">论文</th>
+            <th>文献名称</th>
+            <th>状态</th>
+            <th>信息</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>${papers.map((paper) => paperRowHtml(paper, group)).join("")}</tbody>
+      </table>
+    </div>`;
 }
 
 function statusBadge(job, paper) {
@@ -1208,15 +1315,38 @@ function renderLibrary() {
     const items = buckets[group];
     $(groupId).hidden = !items.length;
     $(countId).textContent = items.length;
-    $(gridId).innerHTML = items.map((p) => paperCardHtml(p, group)).join("");
+    $(gridId).innerHTML = libraryViewMode === "list"
+      ? paperTableHtml(items, group)
+      : items.map((p) => paperCardHtml(p, group)).join("");
   };
   // 待抽取排在已完成前面：这是用户最需要动手处理的一组
   fill("pending", "groupPending", "pendingGrid", "pendingCount");
   fill("done", "groupDone", "doneGrid", "doneCount");
   fill("failed", "groupFailed", "failedGrid", "failedCount");
 
+  syncLibraryViewMode();
   syncBulkBar();
 }
+
+function syncLibraryViewMode() {
+  document.querySelectorAll("#pendingGrid, #doneGrid, #failedGrid").forEach((grid) => {
+    grid.classList.toggle("list-mode", libraryViewMode === "list");
+  });
+  document.querySelectorAll("[data-library-mode]").forEach((button) => {
+    const active = button.dataset.libraryMode === libraryViewMode;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+}
+
+on("libraryViewToggle", "click", (event) => {
+  const button = event.target.closest("[data-library-mode]");
+  if (!button) return;
+  libraryViewMode = button.dataset.libraryMode;
+  try { localStorage.setItem(LIBRARY_VIEW_KEY, libraryViewMode); } catch (_) { }
+  renderLibrary();
+});
+syncLibraryViewMode();
 
 /* ---- 批量操作 ---- */
 
@@ -1287,7 +1417,7 @@ function handlePickChange(event) {
   if (!box) return;
   const id = Number(box.dataset.pick);
   if (box.checked) S.picked.add(id); else S.picked.delete(id);
-  box.closest(".paper-card").classList.toggle("picked", box.checked);
+  box.closest(".paper-item").classList.toggle("picked", box.checked);
   syncBulkBar();
 }
 
@@ -1364,7 +1494,7 @@ on("bulkDelete", "click", async () => {
 });
 
 async function handleCardAction(event) {
-  const card = event.target.closest(".paper-card");
+  const card = event.target.closest(".paper-item");
   const button = event.target.closest("button[data-act]");
   if (!card || !button) return;
   const id = Number(card.dataset.id);
@@ -2224,6 +2354,7 @@ async function openPaper(paperFk) {
   S.recordIndex = 0;
   S.dirty.clear();
   S.activeField = null;
+  $("regionResult").hidden = true;
 
   const job = S.paper.latest_job;
   $("reviewMeta").innerHTML = [
@@ -2238,6 +2369,9 @@ async function openPaper(paperFk) {
   renderRecordTabs();
   renderFields();
   await showPage(firstEvidencePage() || 1);
+  if (!$("regionHistory").hidden && $("regionHistoryScope").value === "current") {
+    loadRegionHistory();
+  }
 }
 
 function currentRecord() {
@@ -2356,6 +2490,8 @@ async function showPage(page, highlight = null) {
   const total = S.paper.pages;
   S.page = Math.max(1, Math.min(total, page));
   S.highlight = highlight;
+  $("regionResult").hidden = true;
+  $("regionBox").hidden = true;
   $("pageLabel").textContent = `${S.page} / ${total}`;
 
   if (S.pageView === "image") await renderPageImage();
@@ -2577,11 +2713,11 @@ function syncPageView() {
   $("pageText").hidden = isImage || isZh;
   $("pageZh").hidden = !isZh;
   // 缩放与框选只对原版视图有意义
-  const menu = $("toolMenu");
-  if (menu) menu.hidden = !isImage;
+  $("pageTools").hidden = !isImage;
   if (!isImage) {
-    const pop = $("toolPopover");
-    if (pop) pop.hidden = true;
+    closeTranslationTools();
+    $("regionHistory").hidden = true;
+    $("regionHistoryToggle").setAttribute("aria-expanded", "false");
   }
   document.querySelectorAll("[data-pageview]").forEach((button) =>
     button.classList.toggle("active", button.dataset.pageview === S.pageView));
@@ -2673,31 +2809,102 @@ on("pageViewToggle", "click", async (event) => {
   await showPage(S.page, S.highlight);
 });
 
+const REGION_HISTORY_SPLIT_KEY = "mesoscope-region-history-height";
+const REGION_RESULT_SPLIT_KEY = "mesoscope-region-result-height";
+let syncWorkbenchCross = () => {};
+let syncRegionResultSplit = () => {};
+let applyRegionHistoryHeight = () => {};
+
+/** 翻译记录和抽取记录之间的分隔条可拖动调整高度。 */
+(function initRegionHistorySplit() {
+  const panel = document.querySelector(".field-panel");
+  const history = $("regionHistory");
+  const bar = $("regionHistorySplit");
+  const recordsHead = history.nextElementSibling;
+  const footer = $("reviewFoot");
+  if (!panel || !history || !bar || !recordsHead || !footer) return;
+
+  let ratio = 0.38;
+  try {
+    const saved = parseFloat(localStorage.getItem(REGION_HISTORY_SPLIT_KEY));
+    if (Number.isFinite(saved)) ratio = saved;
+  } catch (_) { }
+
+  const getBounds = () => {
+    const panelHeight = panel.clientHeight;
+    const fixedHeight = recordsHead.offsetHeight
+      + (footer.hidden ? 0 : footer.offsetHeight)
+      + 6;
+    const maxHeight = Math.max(100, panelHeight - fixedHeight - 100);
+    return { panelHeight, minHeight: Math.min(100, maxHeight), maxHeight };
+  };
+
+  const applyHeight = (height) => {
+    const { panelHeight, minHeight, maxHeight } = getBounds();
+    if (!panelHeight) return;
+    const clampedHeight = Math.min(maxHeight, Math.max(minHeight, height));
+    ratio = clampedHeight / panelHeight;
+    history.style.flex = `0 0 ${ratio * 100}%`;
+    bar.setAttribute("aria-valuemin", String(Math.round(minHeight)));
+    bar.setAttribute("aria-valuemax", String(Math.round(maxHeight)));
+    bar.setAttribute("aria-valuenow", String(Math.round(clampedHeight)));
+    syncWorkbenchCross();
+  };
+  applyRegionHistoryHeight = applyHeight;
+
+  const applySavedHeight = () => {
+    const { panelHeight } = getBounds();
+    if (panelHeight) applyHeight(panelHeight * ratio);
+  };
+
+  let dragging = false;
+  bar.addEventListener("pointerdown", (event) => {
+    dragging = true;
+    bar.setPointerCapture(event.pointerId);
+    bar.classList.add("dragging");
+    event.preventDefault();
+  });
+  bar.addEventListener("pointermove", (event) => {
+    if (!dragging) return;
+    const panelTop = panel.getBoundingClientRect().top + panel.clientTop;
+    applyHeight(event.clientY - panelTop);
+  });
+  const stopDragging = () => {
+    if (!dragging) return;
+    dragging = false;
+    bar.classList.remove("dragging");
+    try { localStorage.setItem(REGION_HISTORY_SPLIT_KEY, String(ratio)); } catch (_) { }
+  };
+  bar.addEventListener("pointerup", stopDragging);
+  bar.addEventListener("pointercancel", stopDragging);
+  bar.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+    event.preventDefault();
+    applyHeight(history.getBoundingClientRect().height + (event.key === "ArrowUp" ? -16 : 16));
+    try { localStorage.setItem(REGION_HISTORY_SPLIT_KEY, String(ratio)); } catch (_) { }
+  });
+
+  on("regionHistoryToggle", "click", () => requestAnimationFrame(() => {
+    applySavedHeight();
+    syncWorkbenchCross();
+  }));
+  window.addEventListener("resize", () => {
+    applySavedHeight();
+    syncWorkbenchCross();
+  });
+  requestAnimationFrame(applySavedHeight);
+})();
+
 function setZoom(value) {
   S.zoom = Math.max(0.5, Math.min(3, Number(value.toFixed(2))));
   $("zoomLabel").textContent = `${Math.round(S.zoom * 100)}%`;
   $("pageImage").style.width = `${S.zoom * 100}%`;
 }
 
-/* ---- 工具菜单与左右分栏 ---- */
-
-on("toolMenuBtn", "click", (event) => {
-  event.stopPropagation();
-  const pop = $("toolPopover");
-  pop.hidden = !pop.hidden;
-  $("toolMenuBtn").setAttribute("aria-expanded", String(!pop.hidden));
-});
-
-document.addEventListener("click", (event) => {
-  const pop = $("toolPopover");
-  if (!pop || pop.hidden) return;
-  if (!event.target.closest("#toolMenu")) {
-    pop.hidden = true;
-    $("toolMenuBtn").setAttribute("aria-expanded", "false");
-  }
-});
+/* ---- 页面工具与左右分栏 ---- */
 
 const SPLIT_KEY = "cheminfo-split";
+let applyWorkbenchSplit = () => {};
 
 /** 左右面板比例可拖动；记住用户的选择。 */
 (function initSplit() {
@@ -2710,7 +2917,10 @@ const SPLIT_KEY = "cheminfo-split";
     bench.style.gridTemplateColumns =
       `minmax(0, ${value}fr) 6px minmax(0, ${1 - value}fr)`;
     S.splitRatio = value;
+    syncWorkbenchCross();
+    syncRegionResultSplit();
   };
+  applyWorkbenchSplit = apply;
 
   let saved = null;
   try { saved = parseFloat(localStorage.getItem(SPLIT_KEY)); } catch (_) { }
@@ -2735,10 +2945,6 @@ const SPLIT_KEY = "cheminfo-split";
   };
   bar.addEventListener("pointerup", stop);
   bar.addEventListener("pointercancel", stop);
-  bar.addEventListener("dblclick", () => {
-    apply(0.5);
-    try { localStorage.setItem(SPLIT_KEY, "0.5"); } catch (_) { }
-  });
   // 键盘可达：左右方向键微调
   bar.addEventListener("keydown", (event) => {
     if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
@@ -2746,6 +2952,258 @@ const SPLIT_KEY = "cheminfo-split";
     apply(S.splitRatio + (event.key === "ArrowLeft" ? -0.03 : 0.03));
     try { localStorage.setItem(SPLIT_KEY, String(S.splitRatio)); } catch (_) { }
   });
+})();
+
+/** 交点拖动时同时更新左右栏宽度和翻译记录高度。 */
+(function initWorkbenchCrossHandle() {
+  const bench = document.querySelector(".workbench");
+  const verticalBar = $("workbenchSplit");
+  const historyPanel = $("regionHistory");
+  const horizontalBar = $("regionHistorySplit");
+  const handle = $("workbenchCrossHandle");
+  if (!bench || !verticalBar || !historyPanel || !horizontalBar || !handle) return;
+  const fieldPanel = historyPanel.parentElement;
+  if (!fieldPanel) return;
+
+  const syncPosition = () => {
+    if (historyPanel.hidden || !bench.clientWidth) {
+      horizontalBar.hidden = true;
+      handle.hidden = true;
+      return;
+    }
+
+    const benchRect = bench.getBoundingClientRect();
+    const verticalRect = verticalBar.getBoundingClientRect();
+    const historyRect = historyPanel.getBoundingClientRect();
+    const fieldRect = fieldPanel.getBoundingClientRect();
+    const crossX = verticalRect.left + verticalRect.width / 2 - benchRect.left;
+    const crossY = historyRect.bottom - benchRect.top;
+    horizontalBar.style.left = `${crossX}px`;
+    horizontalBar.style.top = `${crossY - 3}px`;
+    horizontalBar.style.width = `${Math.max(0, fieldRect.right - benchRect.left - crossX - 12)}px`;
+    handle.style.left = `${crossX}px`;
+    handle.style.top = `${crossY}px`;
+    horizontalBar.hidden = false;
+    handle.hidden = false;
+  };
+  syncWorkbenchCross = syncPosition;
+
+  const saveRatios = () => {
+    try {
+      localStorage.setItem(SPLIT_KEY, String(S.splitRatio));
+      localStorage.setItem(
+        REGION_HISTORY_SPLIT_KEY,
+        String(historyPanel.getBoundingClientRect().height / historyPanel.parentElement.clientHeight),
+      );
+    } catch (_) { }
+  };
+
+  let dragging = false;
+  handle.addEventListener("pointerenter", () => bench.classList.add("cross-hover"));
+  handle.addEventListener("pointerleave", () => bench.classList.remove("cross-hover"));
+  handle.addEventListener("focus", () => bench.classList.add("cross-focus"));
+  handle.addEventListener("blur", () => bench.classList.remove("cross-focus"));
+  handle.addEventListener("pointerdown", (event) => {
+    dragging = true;
+    handle.setPointerCapture(event.pointerId);
+    bench.classList.add("cross-dragging");
+    event.preventDefault();
+  });
+  handle.addEventListener("pointermove", (event) => {
+    if (!dragging) return;
+    const benchRect = bench.getBoundingClientRect();
+    const panel = historyPanel.parentElement;
+    const panelTop = panel.getBoundingClientRect().top + panel.clientTop;
+    applyWorkbenchSplit((event.clientX - benchRect.left) / benchRect.width);
+    applyRegionHistoryHeight(event.clientY - panelTop);
+    syncPosition();
+    syncRegionResultSplit();
+  });
+  const stopDragging = () => {
+    if (!dragging) return;
+    dragging = false;
+    bench.classList.remove("cross-dragging");
+    saveRatios();
+  };
+  handle.addEventListener("pointerup", stopDragging);
+  handle.addEventListener("pointercancel", stopDragging);
+  handle.addEventListener("keydown", (event) => {
+    const horizontalDelta = event.key === "ArrowLeft" ? -0.03 : event.key === "ArrowRight" ? 0.03 : 0;
+    const verticalDelta = event.key === "ArrowUp" ? -16 : event.key === "ArrowDown" ? 16 : 0;
+    if (!horizontalDelta && !verticalDelta) return;
+    event.preventDefault();
+    if (horizontalDelta) applyWorkbenchSplit(S.splitRatio + horizontalDelta);
+    if (verticalDelta) {
+      applyRegionHistoryHeight(
+        historyPanel.getBoundingClientRect().height + verticalDelta,
+      );
+    }
+    syncPosition();
+    saveRatios();
+  });
+
+  new MutationObserver(syncPosition).observe(historyPanel, {
+    attributes: true,
+    attributeFilter: ["hidden"],
+  });
+  window.addEventListener("resize", syncPosition);
+  requestAnimationFrame(syncPosition);
+})();
+
+/** 框选翻译结果栏可拖动调整高度，并可在与宽度分隔条的交点联动调整。 */
+(function initRegionResultSplit() {
+  const bench = document.querySelector(".workbench");
+  const pdfPanel = document.querySelector(".pdf-panel");
+  const verticalBar = $("workbenchSplit");
+  const result = $("regionResult");
+  const bar = $("regionResultSplit");
+  const handle = $("workbenchResultCrossHandle");
+  const evidenceBox = $("evidenceBox");
+  if (!bench || !pdfPanel || !verticalBar || !result || !bar || !handle) return;
+  const panelHead = pdfPanel.querySelector(".panel-head");
+  if (!panelHead || !evidenceBox) return;
+
+  let ratio = 0.34;
+  try {
+    const saved = parseFloat(localStorage.getItem(REGION_RESULT_SPLIT_KEY));
+    if (Number.isFinite(saved)) ratio = saved;
+  } catch (_) { }
+
+  const getBounds = () => {
+    const panelHeight = pdfPanel.clientHeight;
+    const fixedHeight = panelHead.offsetHeight
+      + (evidenceBox.hidden ? 0 : evidenceBox.offsetHeight);
+    const maxHeight = Math.max(100, panelHeight - fixedHeight - 120);
+    return { panelHeight, minHeight: Math.min(100, maxHeight), maxHeight };
+  };
+
+  const applyHeight = (height) => {
+    const { panelHeight, minHeight, maxHeight } = getBounds();
+    if (!panelHeight) return;
+    const clampedHeight = Math.min(maxHeight, Math.max(minHeight, height));
+    ratio = clampedHeight / panelHeight;
+    result.style.flex = `0 0 ${ratio * 100}%`;
+    bar.setAttribute("aria-valuemin", String(Math.round(minHeight)));
+    bar.setAttribute("aria-valuemax", String(Math.round(maxHeight)));
+    bar.setAttribute("aria-valuenow", String(Math.round(clampedHeight)));
+    syncPosition();
+  };
+
+  const applySavedHeight = () => {
+    const { panelHeight } = getBounds();
+    if (panelHeight) applyHeight(panelHeight * ratio);
+  };
+
+  const syncPosition = () => {
+    if (result.hidden || !bench.clientWidth || !pdfPanel.clientHeight) {
+      bar.hidden = true;
+      handle.hidden = true;
+      bench.classList.remove("result-cross-hover", "result-cross-dragging", "result-cross-focus");
+      return;
+    }
+
+    const benchRect = bench.getBoundingClientRect();
+    const verticalRect = verticalBar.getBoundingClientRect();
+    const panelRect = pdfPanel.getBoundingClientRect();
+    const resultRect = result.getBoundingClientRect();
+    const crossX = verticalRect.left + verticalRect.width / 2 - benchRect.left;
+    const crossY = resultRect.top - benchRect.top;
+    bar.style.left = `${panelRect.left - benchRect.left + 12}px`;
+    bar.style.top = `${crossY - 3}px`;
+    bar.style.width = `${Math.max(0, crossX - (panelRect.left - benchRect.left + 12))}px`;
+    handle.style.left = `${crossX}px`;
+    handle.style.top = `${crossY}px`;
+    bar.hidden = false;
+    handle.hidden = false;
+  };
+  syncRegionResultSplit = syncPosition;
+
+  const saveRatio = () => {
+    try { localStorage.setItem(REGION_RESULT_SPLIT_KEY, String(ratio)); } catch (_) { }
+  };
+
+  let dragging = false;
+  bar.addEventListener("pointerdown", (event) => {
+    dragging = true;
+    bar.setPointerCapture(event.pointerId);
+    bar.classList.add("dragging");
+    event.preventDefault();
+  });
+  bar.addEventListener("pointermove", (event) => {
+    if (!dragging) return;
+    const rect = pdfPanel.getBoundingClientRect();
+    const panelBottom = rect.top + pdfPanel.clientTop + pdfPanel.clientHeight;
+    applyHeight(panelBottom - event.clientY);
+  });
+  const stopDragging = () => {
+    if (!dragging) return;
+    dragging = false;
+    bar.classList.remove("dragging");
+    saveRatio();
+  };
+  bar.addEventListener("pointerup", stopDragging);
+  bar.addEventListener("pointercancel", stopDragging);
+  bar.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+    event.preventDefault();
+    applyHeight(result.getBoundingClientRect().height + (event.key === "ArrowUp" ? 16 : -16));
+    saveRatio();
+  });
+
+  const saveRatios = () => {
+    try {
+      localStorage.setItem(SPLIT_KEY, String(S.splitRatio));
+      localStorage.setItem(REGION_RESULT_SPLIT_KEY, String(ratio));
+    } catch (_) { }
+  };
+
+  let crossDragging = false;
+  handle.addEventListener("pointerenter", () => bench.classList.add("result-cross-hover"));
+  handle.addEventListener("pointerleave", () => bench.classList.remove("result-cross-hover"));
+  handle.addEventListener("focus", () => bench.classList.add("result-cross-focus"));
+  handle.addEventListener("blur", () => bench.classList.remove("result-cross-focus"));
+  handle.addEventListener("pointerdown", (event) => {
+    crossDragging = true;
+    handle.setPointerCapture(event.pointerId);
+    bench.classList.add("result-cross-dragging");
+    event.preventDefault();
+  });
+  handle.addEventListener("pointermove", (event) => {
+    if (!crossDragging) return;
+    const benchRect = bench.getBoundingClientRect();
+    const panelRect = pdfPanel.getBoundingClientRect();
+    const panelBottom = panelRect.top + pdfPanel.clientTop + pdfPanel.clientHeight;
+    applyWorkbenchSplit((event.clientX - benchRect.left) / benchRect.width);
+    applyHeight(panelBottom - event.clientY);
+  });
+  const stopCrossDragging = () => {
+    if (!crossDragging) return;
+    crossDragging = false;
+    bench.classList.remove("result-cross-dragging");
+    saveRatios();
+  };
+  handle.addEventListener("pointerup", stopCrossDragging);
+  handle.addEventListener("pointercancel", stopCrossDragging);
+  handle.addEventListener("keydown", (event) => {
+    const horizontalDelta = event.key === "ArrowLeft" ? -0.03 : event.key === "ArrowRight" ? 0.03 : 0;
+    const verticalDelta = event.key === "ArrowUp" ? 16 : event.key === "ArrowDown" ? -16 : 0;
+    if (!horizontalDelta && !verticalDelta) return;
+    event.preventDefault();
+    if (horizontalDelta) applyWorkbenchSplit(S.splitRatio + horizontalDelta);
+    if (verticalDelta) applyHeight(result.getBoundingClientRect().height + verticalDelta);
+    syncPosition();
+    saveRatios();
+  });
+
+  new MutationObserver(() => {
+    if (!result.hidden) applySavedHeight();
+    syncPosition();
+  }).observe(result, { attributes: true, attributeFilter: ["hidden"] });
+  window.addEventListener("resize", () => {
+    applySavedHeight();
+    syncPosition();
+  });
+  requestAnimationFrame(syncPosition);
 })();
 
 /* ---- SSE 流式读取 ---- */
@@ -2798,18 +3256,163 @@ on("zoomOut", "click", () => setZoom(S.zoom - 0.25));
 
 function syncRegionMode() {
   $("regionMode").classList.toggle("on", S.regionMode);
+  $("translationToolsToggle").classList.toggle("on", S.regionMode);
   $("pageCanvas").classList.toggle("picking", S.regionMode);
 }
+
+function positionTranslationTools() {
+  const trigger = $("translationToolsToggle");
+  const popover = $("translationToolsPopover");
+  const rect = trigger.getBoundingClientRect();
+  const width = popover.offsetWidth;
+  const left = Math.max(8, Math.min(window.innerWidth - width - 8, rect.left));
+  const below = window.innerHeight - rect.bottom;
+  popover.style.left = `${left}px`;
+  if (below >= popover.offsetHeight + 10) {
+    popover.style.top = `${rect.bottom + 5}px`;
+    popover.style.bottom = "auto";
+  } else {
+    popover.style.top = "auto";
+    popover.style.bottom = `${window.innerHeight - rect.top + 5}px`;
+  }
+}
+
+function closeTranslationTools() {
+  $("translationToolsPopover").hidden = true;
+  $("translationToolsToggle").setAttribute("aria-expanded", "false");
+  $("translateProviderPanel").hidden = true;
+  $("translateProviderToggle").setAttribute("aria-expanded", "false");
+}
+
+function setTranslationToolsOpen(open) {
+  const popover = $("translationToolsPopover");
+  popover.hidden = !open;
+  $("translationToolsToggle").setAttribute("aria-expanded", String(open));
+  if (open) positionTranslationTools();
+  else {
+    $("translateProviderPanel").hidden = true;
+    $("translateProviderToggle").setAttribute("aria-expanded", "false");
+  }
+}
+
+on("translationToolsToggle", "click", () => {
+  setTranslationToolsOpen($("translationToolsPopover").hidden);
+});
+
+on("translateProviderToggle", "click", () => {
+  const panel = $("translateProviderPanel");
+  panel.hidden = !panel.hidden;
+  $("translateProviderToggle").setAttribute("aria-expanded", String(!panel.hidden));
+  if (!panel.hidden) positionTranslationTools();
+});
+
+document.addEventListener("click", (event) => {
+  if (!event.target.closest(".translation-tools-dropdown")) closeTranslationTools();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || $("translationToolsPopover").hidden) return;
+  closeTranslationTools();
+  $("translationToolsToggle").focus();
+});
 
 on("regionMode", "click", () => {
   S.regionMode = !S.regionMode;
   syncRegionMode();
+  closeTranslationTools();
   toast(S.regionMode
     ? "框选翻译已开启：在页面上拖出一个区域"
     : "框选翻译已关闭");
 });
 
 on("regionClose", "click", () => { $("regionResult").hidden = true; });
+
+function renderRegionHistory(translations) {
+  const list = $("regionHistoryList");
+  if (!translations.length) {
+    list.innerHTML = '<div class="placeholder">暂无框选翻译记录</div>';
+    return;
+  }
+  list.innerHTML = translations.map((item, index) => {
+    const name = item.paper_title || item.filename || item.paper_key || "文献";
+    const translatedText = String(item.translated_text || "").replace(/\s+/g, " ").trim();
+    const sourceText = String(item.source || "").replace(/\s+/g, " ").trim();
+    return `
+      <button type="button" class="region-history-item" data-region-history-index="${index}"
+        title="${esc(name)} · 第 ${item.page} 页">
+        <span class="region-history-paper">
+          <span title="${esc(name)}">${esc(name)}</span><span>第 ${item.page} 页</span>
+        </span>
+        <span class="region-history-preview" title="${esc(translatedText)}">${esc(translatedText)}</span>
+        <span class="region-history-preview region-history-source"
+          title="原文：${esc(sourceText)}">原文：${esc(sourceText)}</span>
+      </button>`;
+  }).join("");
+}
+
+async function loadRegionHistory() {
+  const list = $("regionHistoryList");
+  const requestId = ++regionHistoryRequest;
+  const scope = $("regionHistoryScope").value;
+  if (scope === "current" && !S.paper) {
+    regionHistoryItems = [];
+    list.innerHTML = '<div class="placeholder">请先打开一篇文献</div>';
+    return;
+  }
+  list.innerHTML = '<div class="placeholder">正在加载翻译记录…</div>';
+  try {
+    const query = scope === "current" && S.paper
+      ? `?paper_fk=${encodeURIComponent(S.paper.id)}` : "";
+    const result = await api(`/api/translate-region/history${query}`);
+    if (requestId !== regionHistoryRequest) return;
+    regionHistoryItems = result.translations || [];
+    renderRegionHistory(regionHistoryItems);
+  } catch (error) {
+    if (requestId === regionHistoryRequest) {
+      list.innerHTML = `<div class="placeholder">读取翻译记录失败：${esc(error.message)}</div>`;
+    }
+  }
+}
+
+on("regionHistoryToggle", "click", () => {
+  const panel = $("regionHistory");
+  panel.hidden = !panel.hidden;
+  $("regionHistoryToggle").setAttribute("aria-expanded", String(!panel.hidden));
+  if (!panel.hidden) loadRegionHistory();
+  closeTranslationTools();
+});
+on("regionHistoryClose", "click", () => {
+  $("regionHistory").hidden = true;
+  $("regionHistoryToggle").setAttribute("aria-expanded", "false");
+});
+on("regionHistoryScope", "change", loadRegionHistory);
+on("regionHistoryList", "click", async (event) => {
+  const button = event.target.closest("[data-region-history-index]");
+  if (!button) return;
+  const item = regionHistoryItems[Number(button.dataset.regionHistoryIndex)];
+  if (!item) return;
+  try {
+    showView("review");
+    if (!S.paper || S.paper.id !== item.paper_fk) await openPaper(item.paper_fk);
+    await showPage(item.page);
+    const rect = item.rect;
+    const box = $("regionBox");
+    box.hidden = false;
+    box.style.left = `${rect.x * 100}%`;
+    box.style.top = `${rect.y * 100}%`;
+    box.style.width = `${rect.w * 100}%`;
+    box.style.height = `${rect.h * 100}%`;
+    $("regionResult").hidden = false;
+    $("regionBody").innerHTML = `
+      <div class="region-zh">${esc(item.translated_text)}</div>
+      <details class="region-src" open>
+        <summary>查看选中的英文原文</summary>
+        <div>${esc(item.source)}</div>
+      </details>`;
+    box.scrollIntoView({ block: "center", behavior: "smooth" });
+  } catch (error) {
+    toast(`打开翻译记录失败：${error.message}`, "err");
+  }
+});
 
 (function initRegionPicker() {
   const canvas = $("pageCanvas");
@@ -2874,25 +3477,33 @@ on("regionClose", "click", () => { $("regionResult").hidden = true; });
 async function translateRegion(rect) {
   const panel = $("regionResult");
   const body = $("regionBody");
+  const paperFk = S.paper.id;
+  const page = S.page;
   panel.hidden = false;
   body.innerHTML = '<div class="placeholder">正在翻译选中区域…</div>';
 
   try {
     const result = await api(
-      `/api/papers/${S.paper.id}/pages/${S.page}/translate-region`,
+      `/api/papers/${paperFk}/pages/${page}/translate-region`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ rect, provider: S.translateProvider || undefined }),
       });
+    if (!S.paper || S.paper.id !== paperFk || S.page !== page) return;
     body.innerHTML = `
       <div class="region-zh">${esc(result.text)}</div>
       <details class="region-src">
         <summary>查看选中的英文原文</summary>
         <div>${esc(result.source)}</div>
       </details>`;
+    if (!$("regionHistory").hidden) loadRegionHistory();
   } catch (error) {
-    body.innerHTML = `<div class="placeholder">${esc(error.message)}</div>`;
+    if (S.paper && S.paper.id === paperFk && S.page === page) {
+      body.innerHTML = `<div class="placeholder">${esc(error.message)}</div>`;
+    } else {
+      toast(`框选翻译失败：${error.message}`, "err");
+    }
   }
 }
 

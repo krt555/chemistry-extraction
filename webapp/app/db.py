@@ -127,10 +127,22 @@ CREATE TABLE IF NOT EXISTS chat_turns (
     created_at     TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS region_translations (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    paper_fk        INTEGER NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
+    page            INTEGER NOT NULL,
+    rect_json       TEXT NOT NULL,
+    source          TEXT NOT NULL,
+    translated_text TEXT NOT NULL,
+    created_at      TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_records_paper ON records(paper_fk);
 CREATE INDEX IF NOT EXISTS idx_jobs_paper ON jobs(paper_fk);
 CREATE INDEX IF NOT EXISTS idx_pages_paper ON paper_pages(paper_fk);
 CREATE INDEX IF NOT EXISTS idx_chat_turns_user ON chat_turns(user_fk, id);
+CREATE INDEX IF NOT EXISTS idx_region_translations_paper
+    ON region_translations(paper_fk, id DESC);
 """
 
 # 旧库升级：CREATE TABLE IF NOT EXISTS 不会给已存在的表补列，
