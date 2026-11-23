@@ -35,6 +35,11 @@ const S = {
 
 const LIBRARY_VIEW_KEY = "mesoscope-library-view";
 let libraryViewMode = "cards";
+let reviewFieldQuery = "";
+let reviewFieldMatchIds = null;
+let reviewFieldSearchTimer = null;
+let reviewFieldSearchRequest = 0;
+let syncCompareSplit = () => {};
 let regionHistoryItems = [];
 let regionHistoryRequest = 0;
 try {
@@ -652,7 +657,6 @@ window.addEventListener("resize", () => {
 });
 
 function showView(name) {
-  closeAiDrawer();
   document.querySelectorAll(".nav-item").forEach((b) =>
     b.classList.toggle("active", b.dataset.view === name));
   document.querySelectorAll(".view").forEach((v) =>
@@ -665,7 +669,10 @@ function showView(name) {
   if (name === "ask") $("askInput").focus();
   if (name === "jobs") loadJobs();
   if (name === "search") runSearch();
-  if (name === "compare") loadCompare();
+  if (name === "compare") {
+    requestAnimationFrame(syncCompareSplit);
+    loadCompare();
+  }
   // 切到「提取结果」时该视图才真正可见，此刻才能量出候选区宽度。
   // 不依赖“选中某篇论文”触发重渲染，进入页面即可判断是否需要「展开」。
   if (name === "review") {
@@ -1013,7 +1020,7 @@ function paperCardHtml(paper, group) {
       <div>
         <label class="paper-pick">
           <input type="checkbox" data-pick="${paper.id}" ${picked ? "checked" : ""} />
-          <span class="paper-key">${esc(paper.paper_key)}</span>
+          <span class="paper-key" data-brief="${paper.id}">${esc(paper.paper_key)}</span>
           ${paper.renamed ? '<span class="paper-renamed" title="已自定义命名">已命名</span>' : ""}
         </label>
         <div class="paper-title-row">
@@ -1069,10 +1076,10 @@ function paperRowHtml(paper, group) {
       <td class="library-paper-id">
         <input type="checkbox" data-pick="${paper.id}" ${picked ? "checked" : ""}
           aria-label="选择 ${esc(paper.paper_key)}" />
-        <span class="paper-key">${esc(paper.paper_key)}</span>
+        <span class="paper-key" data-brief="${paper.id}">${esc(paper.paper_key)}</span>
       </td>
       <td class="library-paper-title">
-        <div class="library-paper-title-line">
+        <div class="library-paper-title-line" data-brief="${paper.id}">
           <button type="button" class="paper-title-link" data-act="open" data-brief="${paper.id}"
             title="${esc(paper.title)}" ${paper.n_records ? "" : "disabled"}>
             ${esc(paper.title)}
@@ -1158,8 +1165,9 @@ async function loadPapers() {
   S.papers = data.papers;
   await loadFolders();
   renderLibrary();
-  renderPaperSwitch();
   renderAskScope();
+  if ($("reviewFieldSearch").value.trim()) updateReviewFieldSearch();
+  else renderPaperSwitch();
   S.papers.forEach((p) => {
     const job = p.latest_job;
     if (job && (job.status === "running" || job.status === "queued")) pollJob(job.id);
@@ -1202,7 +1210,7 @@ function renderFolderBar() {
   $("folderChips").innerHTML = parts.join("");
 }
 
-/** 批量移动与检索页共用同一份文件夹列表。 */
+/** 批量移动、检索和记录列表共用文件夹选项。 */
 function renderFolderSelects() {
   const options = (withNone) =>
     (withNone ? '<option value="">未归档（移出文件夹）</option>' : '<option value="">全部文件夹</option>')
@@ -1221,6 +1229,20 @@ function renderFolderSelects() {
       + '<option value="none">仅未归档</option>';
     search.value = keep;
   }
+  renderPaperListFolderFilters();
+}
+
+function renderPaperListFolderFilters() {
+  const options = '<option value="">全部文件夹</option><option value="none">未归档</option>'
+    + S.folders.map((folder) =>
+      `<option value="${folder.id}">${esc(folder.name)}</option>`).join("");
+  ["reviewFolderFilter", "compareFolderFilter"].forEach((id) => {
+    const select = $(id);
+    if (!select) return;
+    const keep = select.value;
+    select.innerHTML = options;
+    select.value = [...select.options].some((option) => option.value === keep) ? keep : "";
+  });
 }
 
 on("folderChips", "click", async (event) => {
@@ -2172,11 +2194,27 @@ on("guideHide", "click", () => {
 
 /** 卡片式论文切换器：默认只占一行，多出来的折叠，可展开。 */
 function renderPaperSwitch() {
-  const usable = S.papers.filter((p) => p.n_records > 0);
   const box = $("paperSwitch");
   const more = $("switchMore");
+  const query = reviewFieldQuery;
+  if (query && reviewFieldMatchIds === null) {
+    box.innerHTML = '<span class="group-note">正在搜索抽取字段…</span>';
+    more.hidden = true;
+    return;
+  }
+  const folder = $("reviewFolderFilter").value;
+  const usable = S.papers.filter((paper) => {
+    if (!paper.n_records) return false;
+    if (folder === "none" && paper.folder_fk) return false;
+    if (folder && folder !== "none" && String(paper.folder_fk) !== folder) return false;
+    if (!query) return true;
+    const metadata = [paper.title, paper.filename, paper.paper_key]
+      .join(" ").toLowerCase().includes(query);
+    return metadata || reviewFieldMatchIds.has(Number(paper.id));
+  });
   if (!usable.length) {
-    box.innerHTML = '<span class="group-note">还没有已完成抽取的论文。</span>';
+    box.innerHTML = `<span class="group-note">${S.papers.some((paper) => paper.n_records)
+      ? "没有符合筛选条件的文献。" : "还没有已完成抽取的论文。"}</span>`;
     more.hidden = true;
     return;
   }
@@ -2192,6 +2230,32 @@ function renderPaperSwitch() {
   // 布局尚未结算时量不到真实宽度，推到下一帧
   requestAnimationFrame(() => syncSwitchOverflow(usable.length));
 }
+
+function updateReviewFieldSearch() {
+  clearTimeout(reviewFieldSearchTimer);
+  const rawQuery = $("reviewFieldSearch").value.trim();
+  reviewFieldQuery = rawQuery.toLowerCase();
+  reviewFieldMatchIds = rawQuery ? null : new Set();
+  const requestId = ++reviewFieldSearchRequest;
+  renderPaperSwitch();
+  if (!rawQuery) return;
+
+  reviewFieldSearchTimer = setTimeout(async () => {
+    try {
+      const result = await api(`/api/search?q=${encodeURIComponent(rawQuery)}`);
+      if (requestId !== reviewFieldSearchRequest) return;
+      reviewFieldMatchIds = new Set((result.results || []).map((row) => Number(row.paper_fk)));
+    } catch (error) {
+      if (requestId !== reviewFieldSearchRequest) return;
+      reviewFieldMatchIds = new Set();
+      toast(`字段搜索失败：${error.message}`, "err");
+    }
+    renderPaperSwitch();
+  }, 250);
+}
+
+on("reviewFolderFilter", "change", renderPaperSwitch);
+on("reviewFieldSearch", "input", updateReviewFieldSearch);
 
 /** 判断一行是否装不下，据此显示“展开 / 收起”按钮。 */
 function syncSwitchOverflow(total) {
@@ -3627,6 +3691,76 @@ function normValue(value) {
   return String(value).trim().toLowerCase().replace(/\s+/g, " ");
 }
 
+const COMPARE_SPLIT_KEY = "mesoscope-compare-split-width";
+
+(function initCompareSplit() {
+  const layout = document.querySelector(".compare-layout");
+  const bar = $("compareSplit");
+  if (!layout || !bar) return;
+
+  let preferredWidth = null;
+  let currentWidth = 0;
+  try {
+    const saved = parseFloat(localStorage.getItem(COMPARE_SPLIT_KEY));
+    if (Number.isFinite(saved)) preferredWidth = saved;
+  } catch (_) { }
+
+  const bounds = () => {
+    const gap = parseFloat(getComputedStyle(layout).columnGap) || 0;
+    const max = Math.min(520, layout.clientWidth - gap * 2 - 6 - 300);
+    return { gap, min: 200, max: Math.max(200, max) };
+  };
+
+  const applyWidth = (width) => {
+    if (!layout.clientWidth) return;
+    const { min, max } = bounds();
+    currentWidth = Math.min(max, Math.max(min, width));
+    layout.style.gridTemplateColumns =
+      `minmax(0, ${currentWidth}px) 6px minmax(0, 1fr)`;
+    bar.setAttribute("aria-valuemin", String(min));
+    bar.setAttribute("aria-valuemax", String(Math.round(max)));
+    bar.setAttribute("aria-valuenow", String(Math.round(currentWidth)));
+  };
+
+  const applyCurrentWidth = () => {
+    const defaultWidth = window.matchMedia("(max-width: 1180px)").matches ? 240 : 290;
+    applyWidth(preferredWidth === null ? defaultWidth : preferredWidth);
+  };
+  syncCompareSplit = applyCurrentWidth;
+
+  let dragging = false;
+  bar.addEventListener("pointerdown", (event) => {
+    dragging = true;
+    bar.setPointerCapture(event.pointerId);
+    bar.classList.add("dragging");
+    event.preventDefault();
+  });
+  bar.addEventListener("pointermove", (event) => {
+    if (!dragging) return;
+    const rect = layout.getBoundingClientRect();
+    const gap = parseFloat(getComputedStyle(layout).columnGap) || 0;
+    applyWidth(event.clientX - rect.left - gap - bar.offsetWidth / 2);
+  });
+  const stopDragging = () => {
+    if (!dragging) return;
+    dragging = false;
+    bar.classList.remove("dragging");
+    preferredWidth = currentWidth;
+    try { localStorage.setItem(COMPARE_SPLIT_KEY, String(currentWidth)); } catch (_) { }
+  };
+  bar.addEventListener("pointerup", stopDragging);
+  bar.addEventListener("pointercancel", stopDragging);
+  bar.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    applyWidth(currentWidth + (event.key === "ArrowLeft" ? -16 : 16));
+    preferredWidth = currentWidth;
+    try { localStorage.setItem(COMPARE_SPLIT_KEY, String(currentWidth)); } catch (_) { }
+  });
+  window.addEventListener("resize", applyCurrentWidth);
+  requestAnimationFrame(applyCurrentWidth);
+})();
+
 async function loadCompare() {
   let data;
   try { data = await api("/api/search"); }
@@ -3651,17 +3785,25 @@ function renderPickList() {
     box.innerHTML = '<div class="placeholder">还没有抽取记录。</div>';
     return;
   }
+  const rows = filteredCompareRows();
+  if (!rows.length) {
+    box.innerHTML = '<div class="placeholder">没有符合筛选条件的文献或样品。</div>';
+    return;
+  }
   // 按论文分组，跨论文选取时结构清楚
   const groups = new Map();
-  S.compareRows.forEach((r) => {
-    if (!groups.has(r.paper_key)) groups.set(r.paper_key, { title: r.paper_title, items: [] });
+  rows.forEach((r) => {
+    if (!groups.has(r.paper_key)) {
+      groups.set(r.paper_key, { paperFk: r.paper_fk, title: r.paper_title, items: [] });
+    }
     groups.get(r.paper_key).items.push(r);
   });
 
   box.innerHTML = [...groups.entries()].map(([key, group]) => `
     <div class="pick-group">
-      <div class="pick-group-head">${esc(key)}</div>
-      <div class="pick-group-title" title="${esc(group.title)}">${esc(group.title)}</div>
+      <div class="pick-group-head" data-brief="${group.paperFk}">${esc(key)}</div>
+      <div class="pick-group-title" data-brief="${group.paperFk}"
+        title="${esc(group.title)}">${esc(group.title)}</div>
       ${group.items.map((r) => {
     const hint = r.fields.mesostructure || r.fields.surfactant || "—";
     return `
@@ -3675,6 +3817,27 @@ function renderPickList() {
     </div>`).join("");
 }
 
+bindBriefHover($("pickList"));
+
+function filteredCompareRows() {
+  const folder = $("compareFolderFilter").value;
+  const query = $("compareFieldSearch").value.trim().toLowerCase();
+  return S.compareRows.filter((row) => {
+    if (folder === "none" && row.folder_fk != null) return false;
+    if (folder && folder !== "none" && String(row.folder_fk) !== folder) return false;
+    if (!query) return true;
+    const metadata = [row.paper_title, row.paper_key].join(" ").toLowerCase();
+    const fields = Object.values(row.fields || {})
+      .map((value) => String(value ?? ""))
+      .join(" ")
+      .toLowerCase();
+    return metadata.includes(query) || fields.includes(query);
+  });
+}
+
+on("compareFolderFilter", "change", renderPickList);
+on("compareFieldSearch", "input", renderPickList);
+
 on("pickList", "change", (event) => {
   const item = event.target.closest(".pick-item");
   if (!item) return;
@@ -3685,7 +3848,7 @@ on("pickList", "change", (event) => {
 });
 
 on("pickAll", "click", () => {
-  S.compareRows.forEach((r) => S.compareSel.add(r.record_id));
+  filteredCompareRows().forEach((r) => S.compareSel.add(r.record_id));
   renderPickList(); renderCompare();
 });
 on("pickNone", "click", () => {
@@ -3818,7 +3981,7 @@ async function runSearch() {
   $("searchTable").querySelector("tbody").innerHTML = data.results.length
     ? data.results.map((r) => `
       <tr>
-        <td class="link" data-open="${r.paper_fk}" title="${esc(r.paper_title)}">${esc(r.paper_key)}</td>
+        <td class="link" data-open="${r.paper_fk}" data-brief="${r.paper_fk}">${esc(r.paper_key)}</td>
         <td>r${String(r.record_index).padStart(2, "0")}</td>
         ${SEARCH_COLUMNS.map((k) => {
       const value = r.fields[k];
@@ -3841,6 +4004,7 @@ on("searchBtn", "click", runSearch);
 on("searchQ", "keydown", (e) => { if (e.key === "Enter") runSearch(); });
 on("searchPaperQ", "keydown", (e) => { if (e.key === "Enter") runSearch(); });
 on("searchFolder", "change", runSearch);
+bindBriefHover($("searchTable"));
 on("searchTable", "click", async (event) => {
   const cell = event.target.closest("[data-open]");
   if (!cell) return;
@@ -3858,7 +4022,7 @@ async function loadJobs() {
     ? data.jobs.map((j) => `
       <tr>
         <td>${j.id}</td>
-        <td class="link" data-open="${j.paper_fk}">${esc(j.paper_key)}</td>
+        <td class="link" data-open="${j.paper_fk}" data-brief="${j.paper_fk}">${esc(j.paper_key)}</td>
         <td>${statusBadge(j)}</td>
         <td>${esc(j.engine || "—")}</td>
         <td>${esc(j.model || "—")}</td>
@@ -3869,6 +4033,7 @@ async function loadJobs() {
     : '<tr><td colspan="8"><div class="placeholder">还没有任务记录。</div></td></tr>';
 }
 
+bindBriefHover($("jobTable"));
 on("jobTable", "click", async (event) => {
   const cell = event.target.closest("[data-open]");
   if (!cell) return;

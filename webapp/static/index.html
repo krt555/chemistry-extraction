@@ -372,9 +372,20 @@
 
       <section class="view" id="view-review">
         <div class="review-head">
-          <!-- 候选区默认只显示一行，超出折叠 -->
-          <div class="paper-switch collapsed" id="paperSwitch"></div>
-          <button class="btn sm switch-more" id="switchMore" hidden></button>
+          <div class="review-paper-browser">
+            <div class="paper-list-filters">
+              <select class="select tiny-select" id="reviewFolderFilter" aria-label="按文件夹筛选文献">
+                <option value="">全部文件夹</option>
+              </select>
+              <input class="input" id="reviewFieldSearch" type="search"
+                placeholder="搜索文件名或任意字段…" aria-label="搜索文件名或任意抽取字段" />
+            </div>
+            <div class="paper-switch-row">
+              <!-- 候选区默认只显示一行，超出折叠 -->
+              <div class="paper-switch collapsed" id="paperSwitch"></div>
+              <button class="btn sm switch-more" id="switchMore" hidden></button>
+            </div>
+          </div>
           <div class="review-tools">
             <button class="btn" id="historyToggle">修改历史</button>
             <button class="btn" id="exportJsonl" title="JSONL：机器可读格式，用于回灌评测程序">导出 JSONL</button>
@@ -546,8 +557,18 @@
                 </div>
               </div>
             </div>
+            <div class="pick-filters">
+              <select class="select tiny-select" id="compareFolderFilter" aria-label="按文件夹筛选文献">
+                <option value="">全部文件夹</option>
+              </select>
+              <input class="input" id="compareFieldSearch" type="search"
+                placeholder="搜索文件名或任意字段…" aria-label="搜索文件名或任意抽取字段" />
+            </div>
             <div class="pick-list" id="pickList"></div>
           </div>
+          <div class="compare-split" id="compareSplit" role="separator"
+            aria-orientation="vertical" aria-label="调整样品列表宽度" tabindex="0"
+            title="拖动调整左右面板宽度"></div>
           <div class="panel compare-panel">
             <div class="panel-head">
               <span>并排比较</span>
