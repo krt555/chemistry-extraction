@@ -552,12 +552,12 @@ on("themeToggle", "click", () => {
 /* ------------------------------------------------------------------ */
 
 const VIEW_META = {
-  ask: ["AI 助手", "围绕已上传论文提问，回答附带页码引文，点击可跳到原文核对"],
-  library: ["文献库", "上传论文、创建抽取任务、查看进度与记录数量"],
-  review: ["提取结果", "左右联动：点击字段跳到证据原文，可直接修改并保存"],
-  compare: ["样品对比", "跨论文勾选多条记录，生成条件矩阵并高亮差异项"],
-  search: ["跨论文检索", "按字段值与数值区间筛选，横向比较不同论文的合成条件"],
-  jobs: ["任务与日志", "抽取任务状态、使用的引擎与模型、运行提示"],
+  ask: "AI 助手",
+  library: "文献库",
+  review: "提取结果",
+  compare: "样品对比",
+  search: "跨论文检索",
+  jobs: "任务与日志",
 };
 
 function activeViewName() {
@@ -742,9 +742,7 @@ function showView(name) {
     b.classList.toggle("active", b.dataset.view === name));
   document.querySelectorAll(".view").forEach((v) =>
     v.classList.toggle("active", v.id === `view-${name}`));
-  const [title, sub] = VIEW_META[name];
-  $("viewTitle").textContent = title;
-  $("viewSub").textContent = sub;
+  $("viewTitle").textContent = VIEW_META[name];
   syncAiLauncher();
   hideBrief();
   if (name === "ask") $("askInput").focus();
@@ -2966,7 +2964,7 @@ let applyRegionHistoryHeight = () => {};
   const panel = document.querySelector(".field-panel");
   const history = $("regionHistory");
   const bar = $("regionHistorySplit");
-  const recordsHead = history.nextElementSibling;
+  const recordsHead = document.querySelector(".field-records .panel-head");
   const footer = $("reviewFoot");
   if (!panel || !history || !bar || !recordsHead || !footer) return;
 
@@ -3043,7 +3041,7 @@ let applyRegionHistoryHeight = () => {};
 
 function setZoom(value) {
   S.zoom = Math.max(0.5, Math.min(3, Number(value.toFixed(2))));
-  $("zoomLabel").textContent = `${Math.round(S.zoom * 100)}%`;
+  $("zoomInput").value = String(Math.round(S.zoom * 100));
   $("pageImage").style.width = `${S.zoom * 100}%`;
 }
 
@@ -3352,6 +3350,314 @@ let applyWorkbenchSplit = () => {};
   requestAnimationFrame(syncPosition);
 })();
 
+const MOBILE_STACK_SPLIT_KEY = "mesoscope-mobile-workbench-height";
+const MOBILE_REGION_RESULT_WIDTH_KEY = "mesoscope-mobile-region-result-width";
+const MOBILE_REGION_HISTORY_WIDTH_KEY = "mesoscope-mobile-region-history-width";
+let setMobileStackRatio = () => {};
+let moveMobileStackToY = () => {};
+let persistMobileStackRatio = () => {};
+let syncMobileCrossHandles = () => {};
+
+/** 窄屏时，分隔原文定位和抽取记录的上下高度。 */
+(function initMobileStackSplit() {
+  const bench = document.querySelector(".workbench");
+  const bar = $("mobileStackSplit");
+  if (!bench || !bar) return;
+
+  let ratio = 0.5;
+  try {
+    const saved = parseFloat(localStorage.getItem(MOBILE_STACK_SPLIT_KEY));
+    if (Number.isFinite(saved)) ratio = saved;
+  } catch (_) { }
+
+  const availableHeight = () => {
+    const gap = parseFloat(getComputedStyle(bench).rowGap) || 0;
+    return bench.clientHeight - bar.offsetHeight - gap * 2;
+  };
+  const apply = (nextRatio) => {
+    const available = availableHeight();
+    if (available <= 0) return;
+    const minPanelHeight = Math.min(200, available / 2);
+    const firstHeight = Math.min(
+      available - minPanelHeight,
+      Math.max(minPanelHeight, available * nextRatio),
+    );
+    ratio = firstHeight / available;
+    bench.style.gridTemplateRows = `${firstHeight}px ${bar.offsetHeight}px ${available - firstHeight}px`;
+    bar.setAttribute("aria-valuemin", String(Math.round(minPanelHeight)));
+    bar.setAttribute("aria-valuemax", String(Math.round(available - minPanelHeight)));
+    bar.setAttribute("aria-valuenow", String(Math.round(firstHeight)));
+    syncMobileCrossHandles();
+  };
+  setMobileStackRatio = apply;
+  moveMobileStackToY = (clientY) => {
+    const rect = bench.getBoundingClientRect();
+    const available = availableHeight();
+    if (available > 0) apply((clientY - rect.top) / available);
+  };
+  persistMobileStackRatio = () => {
+    try { localStorage.setItem(MOBILE_STACK_SPLIT_KEY, String(ratio)); } catch (_) { }
+  };
+  const sync = () => {
+    if (!window.matchMedia("(max-width: 1100px)").matches) {
+      bench.style.removeProperty("grid-template-rows");
+      return;
+    }
+    apply(ratio);
+  };
+
+  let dragging = false;
+  bar.addEventListener("pointerdown", (event) => {
+    dragging = true;
+    bar.setPointerCapture(event.pointerId);
+    bar.classList.add("dragging");
+    event.preventDefault();
+  });
+  bar.addEventListener("pointermove", (event) => {
+    if (!dragging) return;
+    const rect = bench.getBoundingClientRect();
+    const available = availableHeight();
+    if (available <= 0) return;
+    apply((event.clientY - rect.top) / available);
+  });
+  const stopDragging = () => {
+    if (!dragging) return;
+    dragging = false;
+    bar.classList.remove("dragging");
+    persistMobileStackRatio();
+  };
+  bar.addEventListener("pointerup", stopDragging);
+  bar.addEventListener("pointercancel", stopDragging);
+  bar.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+    event.preventDefault();
+    const available = availableHeight();
+    if (available <= 0) return;
+    const currentHeight = bench.querySelector(".pdf-panel").getBoundingClientRect().height;
+    apply((currentHeight + (event.key === "ArrowUp" ? -16 : 16)) / available);
+    persistMobileStackRatio();
+  });
+  window.addEventListener("resize", sync);
+  requestAnimationFrame(sync);
+})();
+
+/** 窄屏两栏堆叠时，展开的辅助面板可分别调整自己的宽度。 */
+(function initMobileNestedSplits() {
+  const bench = document.querySelector(".workbench");
+  const pdfArea = document.querySelector(".pdf-content-area");
+  const fieldPanel = document.querySelector(".field-panel");
+  const stackBar = $("mobileStackSplit");
+  const regionResult = $("regionResult");
+  const regionHistory = $("regionHistory");
+  const resultBar = $("mobileRegionResultSplit");
+  const historyBar = $("mobileRegionHistorySplit");
+  const resultCross = $("mobileResultCrossHandle");
+  const historyCross = $("mobileHistoryCrossHandle");
+  if (!bench || !pdfArea || !fieldPanel || !stackBar || !regionResult || !regionHistory
+    || !resultBar || !historyBar || !resultCross || !historyCross) return;
+
+  const isNarrow = () => window.matchMedia("(max-width: 1100px)").matches;
+  const loadRatio = (key, fallback) => {
+    try {
+      const saved = parseFloat(localStorage.getItem(key));
+      return Number.isFinite(saved) ? saved : fallback;
+    } catch (_) {
+      return fallback;
+    }
+  };
+  let resultRatio = loadRatio(MOBILE_REGION_RESULT_WIDTH_KEY, 0.38);
+  let historyRatio = loadRatio(MOBILE_REGION_HISTORY_WIDTH_KEY, 0.38);
+
+  const setWidth = (container, variable, nextRatio, bar) => {
+    const width = container.clientWidth;
+    if (!width) return;
+    const minimum = Math.min(140, Math.max(100, width * 0.25));
+    const maximum = Math.max(minimum, width - bar.offsetWidth - minimum);
+    const paneWidth = Math.min(maximum, Math.max(minimum, width * nextRatio));
+    const ratio = paneWidth / width;
+    container.style.setProperty(variable, `${ratio * 100}%`);
+    bar.setAttribute("aria-valuemin", String(Math.round(minimum)));
+    bar.setAttribute("aria-valuemax", String(Math.round(maximum)));
+    bar.setAttribute("aria-valuenow", String(Math.round(paneWidth)));
+    return ratio;
+  };
+
+  const resizePaneAtX = (side, clientX) => {
+    const container = side === "right" ? pdfArea : fieldPanel;
+    const bar = side === "right" ? resultBar : historyBar;
+    const rect = container.getBoundingClientRect();
+    const width = container.clientWidth;
+    if (!width) return;
+    const paneWidth = side === "right" ? rect.right - clientX : clientX - rect.left;
+    const variable = side === "right"
+      ? "--mobile-region-result-width" : "--mobile-region-history-width";
+    const ratio = setWidth(container, variable, paneWidth / width, bar);
+    if (ratio === undefined) return;
+    if (side === "right") resultRatio = ratio;
+    else historyRatio = ratio;
+    syncMobileCrossHandles();
+  };
+
+  const placeCrossHandle = (handle, bar, open) => {
+    const visible = isNarrow() && open && !stackBar.hidden;
+    handle.hidden = !visible;
+    if (!visible) return;
+    const benchRect = bench.getBoundingClientRect();
+    const barRect = bar.getBoundingClientRect();
+    const stackRect = stackBar.getBoundingClientRect();
+    handle.style.left = `${barRect.left + barRect.width / 2 - benchRect.left}px`;
+    handle.style.top = `${stackRect.top + stackRect.height / 2 - benchRect.top}px`;
+  };
+  const syncCrossPositions = () => {
+    placeCrossHandle(resultCross, resultBar, !regionResult.hidden);
+    placeCrossHandle(historyCross, historyBar, !regionHistory.hidden);
+  };
+  syncMobileCrossHandles = syncCrossPositions;
+
+  const sync = () => {
+    const mobile = isNarrow();
+    const resultOpen = mobile && !regionResult.hidden;
+    const historyOpen = mobile && !regionHistory.hidden;
+    pdfArea.classList.toggle("mobile-result-open", resultOpen);
+    fieldPanel.classList.toggle("mobile-history-open", historyOpen);
+    resultBar.hidden = !resultOpen;
+    historyBar.hidden = !historyOpen;
+    if (resultOpen) {
+      resultRatio = setWidth(pdfArea, "--mobile-region-result-width", resultRatio, resultBar)
+        || resultRatio;
+    }
+    if (historyOpen) {
+      historyRatio = setWidth(fieldPanel, "--mobile-region-history-width", historyRatio, historyBar)
+        || historyRatio;
+    }
+    if (mobile) {
+      syncWorkbenchCross();
+      syncRegionResultSplit();
+    }
+    syncCrossPositions();
+  };
+
+  const bindWidthDrag = (bar, container, pane, side, key, getRatio) => {
+    let dragging = false;
+    bar.addEventListener("pointerdown", (event) => {
+      dragging = true;
+      bar.setPointerCapture(event.pointerId);
+      bar.classList.add("dragging");
+      event.preventDefault();
+    });
+    bar.addEventListener("pointermove", (event) => {
+      if (!dragging) return;
+      resizePaneAtX(side, event.clientX);
+      syncCrossPositions();
+    });
+    const stopDragging = () => {
+      if (!dragging) return;
+      dragging = false;
+      bar.classList.remove("dragging");
+      try { localStorage.setItem(key, String(getRatio())); } catch (_) { }
+    };
+    bar.addEventListener("pointerup", stopDragging);
+    bar.addEventListener("pointercancel", stopDragging);
+    bar.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      event.preventDefault();
+      const width = container.clientWidth;
+      const nextWidth = pane.getBoundingClientRect().width
+        + (event.key === "ArrowRight" ? 16 : -16);
+      const variable = side === "right"
+        ? "--mobile-region-result-width" : "--mobile-region-history-width";
+      const nextRatio = setWidth(container, variable, nextWidth / width, bar);
+      if (nextRatio !== undefined) setRatio(nextRatio);
+      try { localStorage.setItem(key, String(getRatio())); } catch (_) { }
+      syncCrossPositions();
+    });
+  };
+
+  bindWidthDrag(
+    resultBar, pdfArea, regionResult, "right", MOBILE_REGION_RESULT_WIDTH_KEY,
+    () => resultRatio,
+  );
+  bindWidthDrag(
+    historyBar, fieldPanel, regionHistory, "left", MOBILE_REGION_HISTORY_WIDTH_KEY,
+    () => historyRatio,
+  );
+
+  const bindCombinedDrag = (handle, side) => {
+    const hoverClass = side === "right"
+      ? "mobile-cross-hover-result" : "mobile-cross-hover-history";
+    const focusClass = side === "right"
+      ? "mobile-cross-focus-result" : "mobile-cross-focus-history";
+    const draggingClass = side === "right"
+      ? "mobile-cross-dragging-result" : "mobile-cross-dragging-history";
+    let dragging = false;
+    handle.addEventListener("pointerenter", () => bench.classList.add(hoverClass));
+    handle.addEventListener("pointerleave", () => bench.classList.remove(hoverClass));
+    handle.addEventListener("focus", () => bench.classList.add(focusClass));
+    handle.addEventListener("blur", () => bench.classList.remove(focusClass));
+    handle.addEventListener("pointerdown", (event) => {
+      dragging = true;
+      handle.setPointerCapture(event.pointerId);
+      bench.classList.add(draggingClass);
+      event.preventDefault();
+    });
+    handle.addEventListener("pointermove", (event) => {
+      if (!dragging) return;
+      moveMobileStackToY(event.clientY);
+      resizePaneAtX(side, event.clientX);
+    });
+    const stopDragging = () => {
+      if (!dragging) return;
+      dragging = false;
+      bench.classList.remove(draggingClass);
+      persistMobileStackRatio();
+      const key = side === "right"
+        ? MOBILE_REGION_RESULT_WIDTH_KEY : MOBILE_REGION_HISTORY_WIDTH_KEY;
+      const ratio = side === "right" ? resultRatio : historyRatio;
+      try { localStorage.setItem(key, String(ratio)); } catch (_) { }
+    };
+    handle.addEventListener("pointerup", stopDragging);
+    handle.addEventListener("pointercancel", stopDragging);
+    handle.addEventListener("keydown", (event) => {
+      const widthDelta = event.key === "ArrowRight" ? 16 : event.key === "ArrowLeft" ? -16 : 0;
+      const heightDelta = event.key === "ArrowDown" ? 16 : event.key === "ArrowUp" ? -16 : 0;
+      if (!widthDelta && !heightDelta) return;
+      event.preventDefault();
+      if (widthDelta) {
+        const pane = side === "right" ? regionResult : regionHistory;
+        const rect = pane.getBoundingClientRect();
+        const clientX = side === "right"
+          ? rect.right - widthDelta
+          : rect.left + widthDelta;
+        resizePaneAtX(side, clientX);
+      }
+      if (heightDelta) {
+        const currentHeight = bench.querySelector(".pdf-panel").getBoundingClientRect().height;
+        const available = bench.clientHeight - stackBar.offsetHeight
+          - (parseFloat(getComputedStyle(bench).rowGap) || 0) * 2;
+        if (available > 0) setMobileStackRatio((currentHeight + heightDelta) / available);
+      }
+      persistMobileStackRatio();
+      const key = side === "right"
+        ? MOBILE_REGION_RESULT_WIDTH_KEY : MOBILE_REGION_HISTORY_WIDTH_KEY;
+      const ratio = side === "right" ? resultRatio : historyRatio;
+      try { localStorage.setItem(key, String(ratio)); } catch (_) { }
+    });
+  };
+  bindCombinedDrag(resultCross, "right");
+  bindCombinedDrag(historyCross, "left");
+
+  new MutationObserver(sync).observe(regionResult, {
+    attributes: true,
+    attributeFilter: ["hidden"],
+  });
+  new MutationObserver(sync).observe(regionHistory, {
+    attributes: true,
+    attributeFilter: ["hidden"],
+  });
+  window.addEventListener("resize", sync);
+  requestAnimationFrame(sync);
+})();
+
 /* ---- SSE 流式读取 ---- */
 
 /** 读取 Server-Sent Events，把 delta 逐段交给回调。 */
@@ -3397,6 +3703,30 @@ async function readStream(path, body, handlers = {}) {
 
 on("zoomIn", "click", () => setZoom(S.zoom + 0.25));
 on("zoomOut", "click", () => setZoom(S.zoom - 0.25));
+
+on("zoomInput", "change", (event) => {
+  const input = event.currentTarget;
+  const value = Number(input.value);
+  if (!Number.isFinite(value) || value < 50 || value > 300) {
+    input.value = String(Math.round(S.zoom * 100));
+    input.reportValidity();
+    return;
+  }
+  setZoom(value / 100);
+});
+on("zoomInput", "keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    event.currentTarget.blur();
+  }
+});
+
+const pageImageWrap = $("pageImageWrap");
+pageImageWrap.addEventListener("wheel", (event) => {
+  if (!event.ctrlKey || S.pageView !== "image" || pageImageWrap.hidden) return;
+  event.preventDefault();
+  setZoom(S.zoom * Math.pow(1.0015, -event.deltaY));
+}, { passive: false });
 
 /* ---- 框选翻译：在页面图上拖一个矩形，只翻译该区域 ---- */
 

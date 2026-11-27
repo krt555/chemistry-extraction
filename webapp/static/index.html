@@ -204,16 +204,7 @@
 
     <main class="main">
       <header class="topbar">
-        <div>
-          <h1 id="viewTitle">文献库</h1>
-          <p id="viewSub">上传论文、创建抽取任务、查看记录数量</p>
-        </div>
-        <div class="topbar-actions">
-          <label class="btn primary" for="fileInput">
-            <span>＋ 上传 PDF</span>
-            <input id="fileInput" type="file" accept="application/pdf" multiple hidden />
-          </label>
-        </div>
+        <h1 id="viewTitle">文献库</h1>
       </header>
 
       <!-- AI 助手独立成首页，也会在悬浮入口打开时移入右侧抽屉 -->
@@ -292,6 +283,10 @@
               aria-pressed="false" title="列表模式">列表</button>
           </div>
           <button class="btn sm" id="folderNew" title="新建一个文件夹用于归纳论文">＋ 新建文件夹</button>
+          <label class="btn sm primary" for="fileInput">
+            <span>＋ 上传 PDF</span>
+            <input id="fileInput" type="file" accept="application/pdf" multiple hidden />
+          </label>
         </div>
 
         <!-- 批量操作栏：面对大量文件时避免逐个点击 -->
@@ -400,7 +395,9 @@
                 <div class="page-tools" id="pageTools">
                   <div class="page-tool-group zoom-tool-group" role="group" aria-label="页面缩放">
                     <button class="icon-btn" id="zoomOut" title="缩小">－</button>
-                    <span id="zoomLabel">100%</span>
+                    <input class="zoom-input" id="zoomInput" type="number" min="50" max="300" step="1"
+                      value="100" aria-label="PDF 缩放百分比" title="输入 50–300 的数值调整 PDF 缩放" />
+                    <span class="zoom-percent" aria-hidden="true">%</span>
                     <button class="icon-btn" id="zoomIn" title="放大">＋</button>
                   </div>
                   <div class="translation-tools-dropdown">
@@ -447,35 +444,49 @@
               <p class="evidence-miss" id="evidenceMiss" hidden></p>
             </div>
 
-            <!-- 原版视图：页面图片 + 按坐标叠加的高亮框 -->
-            <div class="page-image-wrap" id="pageImageWrap">
-              <div class="placeholder" id="pageImageHint">在右侧点击任意字段，这里会跳转到证据所在页并框出原句。</div>
-              <div class="page-canvas" id="pageCanvas" hidden>
-                <img id="pageImage" alt="论文页面" />
-                <div class="page-marks" id="pageMarks"></div>
-                <div class="region-box" id="regionBox" hidden></div>
+            <div class="pdf-content-area">
+              <!-- 原版视图：页面图片 + 按坐标叠加的高亮框 -->
+              <div class="page-image-wrap" id="pageImageWrap">
+                <div class="placeholder" id="pageImageHint">在右侧点击任意字段，这里会跳转到证据所在页并框出原句。</div>
+                <div class="page-canvas" id="pageCanvas" hidden>
+                  <img id="pageImage" alt="论文页面" />
+                  <div class="page-marks" id="pageMarks"></div>
+                  <div class="region-box" id="regionBox" hidden></div>
+                </div>
               </div>
-            </div>
 
-            <!-- 框选翻译结果 -->
-            <div class="region-result" id="regionResult" hidden>
-              <div class="region-head">
-                <span>框选翻译</span>
-                <button class="icon-btn" id="regionClose">×</button>
+              <div class="mobile-nested-split mobile-region-result-split" id="mobileRegionResultSplit"
+                role="separator" aria-orientation="vertical" aria-label="调整原文与框选翻译宽度"
+                tabindex="0" hidden title="拖动调整原文与框选翻译宽度"></div>
+              <!-- 框选翻译结果 -->
+              <div class="region-result" id="regionResult" hidden>
+                <div class="region-head">
+                  <span>框选翻译</span>
+                  <button class="icon-btn" id="regionClose">×</button>
+                </div>
+                <div class="region-body" id="regionBody"></div>
               </div>
-              <div class="region-body" id="regionBody"></div>
-            </div>
-            <!-- 文本视图：纯文字 + 结构化表格 -->
-            <div class="page-text" id="pageText" hidden>
-              <div class="placeholder">在右侧点击任意字段，这里会跳转到证据所在页并高亮引文。</div>
-            </div>
+              <!-- 文本视图：纯文字 + 结构化表格 -->
+              <div class="page-text" id="pageText" hidden>
+                <div class="placeholder">在右侧点击任意字段，这里会跳转到证据所在页并高亮引文。</div>
+              </div>
 
-            <!-- 中文视图：整页译文 -->
-            <div class="page-text page-zh" id="pageZh" hidden>
-              <div class="placeholder">点击上方「中文」可把本页正文翻译成中文。</div>
+              <!-- 中文视图：整页译文 -->
+              <div class="page-text page-zh" id="pageZh" hidden>
+                <div class="placeholder">点击上方「中文」可把本页正文翻译成中文。</div>
+              </div>
             </div>
           </div>
-          <!-- 拖动调整左右占比 -->
+          <div class="mobile-stack-split" id="mobileStackSplit" role="separator"
+            aria-orientation="horizontal" aria-label="调整原文定位与抽取记录高度"
+            tabindex="0" title="拖动调整原文定位与抽取记录高度"></div>
+          <div class="mobile-stack-cross-handle mobile-result-cross-handle" id="mobileResultCrossHandle"
+            role="button" aria-label="同时调整原文与框选翻译宽度及上下模块高度"
+            tabindex="0" hidden title="拖动同时调整框选翻译宽度和模块高度"></div>
+          <div class="mobile-stack-cross-handle mobile-history-cross-handle" id="mobileHistoryCrossHandle"
+            role="button" aria-label="同时调整翻译记录与抽取记录宽度及上下模块高度"
+            tabindex="0" hidden title="拖动同时调整翻译记录宽度和模块高度"></div>
+          <!-- 桌面端拖动调整左右占比 -->
           <div class="workbench-split" id="workbenchSplit" role="separator" aria-orientation="vertical" tabindex="0"
             title="拖动调整左右宽度"></div>
           <div class="panel field-panel">
@@ -492,36 +503,41 @@
               </div>
               <div class="region-history-list" id="regionHistoryList"></div>
             </section>
-            <div class="panel-head">
-              <span>抽取记录</span>
-              <div class="panel-head-tools">
-                <div class="record-tabs" id="recordTabs"></div>
-                <div class="help-tip">
-                  <button class="help-icon" type="button" aria-label="抽取记录说明" aria-expanded="false"
-                    aria-controls="recordHelp">?</button>
-                  <div class="help-popover" id="recordHelp">
-                    每行一个字段。<b>p.3</b> 这样的蓝色标签表示这个值来自原文第 3 页，点击条目将跳转至页面并高亮原句；
-                    <b>百分数</b>为 AI 对该值的把握程度。值写着「null（未报道）」意味着论文里未提及或 Agent 未能成功提取。
-                    改完记得点右下角<b>保存修改</b>。
+            <div class="mobile-nested-split mobile-region-history-split" id="mobileRegionHistorySplit"
+              role="separator" aria-orientation="vertical" aria-label="调整翻译记录与抽取记录宽度"
+              tabindex="0" hidden title="拖动调整翻译记录与抽取记录宽度"></div>
+            <div class="field-records">
+              <div class="panel-head">
+                <span>抽取记录</span>
+                <div class="panel-head-tools">
+                  <div class="record-tabs" id="recordTabs"></div>
+                  <div class="help-tip">
+                    <button class="help-icon" type="button" aria-label="抽取记录说明" aria-expanded="false"
+                      aria-controls="recordHelp">?</button>
+                    <div class="help-popover" id="recordHelp">
+                      每行一个字段。<b>p.3</b> 这样的蓝色标签表示这个值来自原文第 3 页，点击条目将跳转至页面并高亮原句；
+                      <b>百分数</b>为 AI 对该值的把握程度。值写着「null（未报道）」意味着论文里未提及或 Agent 未能成功提取。
+                      改完记得点右下角<b>保存修改</b>。
+                    </div>
                   </div>
                 </div>
               </div>
-            </div>
-            <div class="field-list" id="fieldList">
-              <div class="placeholder">选择一篇已完成抽取的论文。</div>
-            </div>
-            <div class="history-box" id="historyBox" hidden>
-              <div class="history-head">
-                <span>修改历史 <em id="historyCount">0</em></span>
-                <button class="icon-btn" id="historyClose">×</button>
+              <div class="field-list" id="fieldList">
+                <div class="placeholder">选择一篇已完成抽取的论文。</div>
               </div>
-              <div class="history-list" id="historyList"></div>
-            </div>
-            <div class="panel-foot" id="reviewFoot" hidden>
-              <label class="check" title="仅作为人工标记，方便筛选和分工，不会改动字段内容">
-                <input type="checkbox" id="reviewedFlag" /> 标记为已复核
-              </label>
-              <button class="btn primary" id="saveRecord">保存修改</button>
+              <div class="history-box" id="historyBox" hidden>
+                <div class="history-head">
+                  <span>修改历史 <em id="historyCount">0</em></span>
+                  <button class="icon-btn" id="historyClose">×</button>
+                </div>
+                <div class="history-list" id="historyList"></div>
+              </div>
+              <div class="panel-foot" id="reviewFoot" hidden>
+                <label class="check" title="仅作为人工标记，方便筛选和分工，不会改动字段内容">
+                  <input type="checkbox" id="reviewedFlag" /> 标记为已复核
+                </label>
+                <button class="btn primary" id="saveRecord">保存修改</button>
+              </div>
             </div>
           </div>
           <div class="region-history-split" id="regionHistorySplit" role="separator"
