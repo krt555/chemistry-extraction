@@ -166,6 +166,39 @@
         <button class="theme-btn" id="themeToggle" title="切换主题">
           <span id="themeIcon">☾</span><span id="themeLabel">夜间模式</span>
         </button>
+        <div class="account-menu sidebar-account-menu" id="accountMenu">
+          <div class="sidebar-account-trigger">
+            <button class="avatar-btn" id="avatarBtn" aria-haspopup="true" aria-expanded="false" title="账号">
+              <span class="avatar-letter" id="accountAvatar">?</span>
+            </button>
+            <span class="sidebar-account-name" id="sidebarAccountName">登录 / 注册</span>
+          </div>
+
+          <div class="account-pop" id="accountPop" hidden>
+            <div class="account-pop-anon" id="accountPopAnon">
+              <strong>还没有登录</strong>
+              <p>登录后文献库、个人信息会跟随账号，换设备也能看到同样的内容。</p>
+              <div class="account-pop-actions">
+                <button class="btn primary sm" id="popLogin">登录</button>
+                <button class="btn sm" id="popRegister">注册</button>
+              </div>
+            </div>
+
+            <div class="account-pop-user" id="accountPopUser" hidden>
+              <div class="account-pop-head">
+                <span class="account-avatar lg" id="popAvatar">?</span>
+                <span class="account-pop-text">
+                  <strong id="accountName">未登录</strong>
+                  <span id="accountMeta">—</span>
+                </span>
+              </div>
+              <div class="account-pop-menu">
+                <button id="popProfile">个人信息</button>
+                <button id="popLogout" class="danger">退出登录</button>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
     </aside>
 
@@ -180,40 +213,6 @@
             <span>＋ 上传 PDF</span>
             <input id="fileInput" type="file" accept="application/pdf" multiple hidden />
           </label>
-
-          <!-- 右上角头像：未登录时点开去登录/注册，已登录时点开账号菜单 -->
-          <div class="account-menu" id="accountMenu">
-            <button class="avatar-btn" id="avatarBtn" aria-haspopup="true" aria-expanded="false" title="账号">
-              <span class="avatar-letter" id="accountAvatar">?</span>
-            </button>
-
-            <div class="account-pop" id="accountPop" hidden>
-              <!-- 未登录态 -->
-              <div class="account-pop-anon" id="accountPopAnon">
-                <strong>还没有登录</strong>
-                <p>登录后文献库、个人信息会跟随账号，换设备也能看到同样的内容。</p>
-                <div class="account-pop-actions">
-                  <button class="btn primary sm" id="popLogin">登录</button>
-                  <button class="btn sm" id="popRegister">注册</button>
-                </div>
-              </div>
-
-              <!-- 已登录态 -->
-              <div class="account-pop-user" id="accountPopUser" hidden>
-                <div class="account-pop-head">
-                  <span class="account-avatar lg" id="popAvatar">?</span>
-                  <span class="account-pop-text">
-                    <strong id="accountName">未登录</strong>
-                    <span id="accountMeta">—</span>
-                  </span>
-                </div>
-                <div class="account-pop-menu">
-                  <button id="popProfile">个人信息</button>
-                  <button id="popLogout" class="danger">退出登录</button>
-                </div>
-              </div>
-            </div>
-          </div>
         </div>
       </header>
 
@@ -646,7 +645,8 @@
                 <th>模型</th>
                 <th>记录</th>
                 <th>提示</th>
-                <th>时间</th>
+                <th>开始时间</th>
+                <th>结束时间</th>
               </tr>
             </thead>
             <tbody></tbody>
@@ -655,6 +655,9 @@
       </section>
     </main>
 
+    <div class="ai-drawer-split" id="aiDrawerSplit" role="separator"
+      aria-orientation="vertical" aria-label="调整 AI 助手抽屉宽度" tabindex="0"
+      title="拖动调整 AI 助手抽屉宽度" hidden></div>
     <aside class="ai-drawer" id="aiDrawer" aria-label="AI 助手">
       <div class="ai-drawer-head">
         <strong>AI 助手</strong>

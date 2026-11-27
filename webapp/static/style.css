@@ -185,8 +185,7 @@ button, input, select { font-family: inherit; font-size: inherit; color: inherit
 .app.sidebar-collapsed .brand-text,
 .app.sidebar-collapsed .nav-text,
 .app.sidebar-collapsed .engine-row,
-.app.sidebar-collapsed .engine-card p,
-.app.sidebar-collapsed .theme-btn { display: none; }
+.app.sidebar-collapsed .engine-card p { display: none; }
 .app.sidebar-collapsed .nav { width: 100%; }
 .app.sidebar-collapsed .nav-item { justify-content: center; padding: 9px 0; }
 .app.sidebar-collapsed .engine-card { background: transparent; border: 0; padding: 0; }
@@ -198,6 +197,23 @@ button, input, select { font-family: inherit; font-size: inherit; color: inherit
   font-size: 0;
 }
 .app.sidebar-collapsed .engine-setup::before { content: "⚙"; font-size: 16px; }
+.app.sidebar-collapsed .sidebar-foot { width: 100%; align-items: center; }
+.app.sidebar-collapsed .theme-btn {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  margin: 0 auto;
+  place-items: center;
+}
+.app.sidebar-collapsed .theme-btn #themeLabel { display: none; }
+.app.sidebar-collapsed .sidebar-account-menu { width: 40px; }
+.app.sidebar-collapsed .sidebar-account-trigger { flex-direction: column; gap: 4px; }
+.app.sidebar-collapsed .sidebar-account-name {
+  max-width: 48px;
+  font-size: 9px;
+  text-align: center;
+}
 .app.sidebar-collapsed .nav-item[data-tip]:hover::after,
 .app.sidebar-collapsed .nav-item[data-tip]:focus-visible::after {
   content: attr(data-tip);
@@ -262,11 +278,23 @@ button, input, select { font-family: inherit; font-size: inherit; color: inherit
 .ask-view-slot { display: contents; }
 
 .app.ai-drawer-open {
-  grid-template-columns: 236px minmax(0, 1fr) minmax(320px, min(440px, 38vw));
+  grid-template-columns: 236px minmax(0, 1fr) 6px
+    minmax(320px, var(--ai-drawer-width, min(440px, 38vw)));
 }
 .app.sidebar-collapsed.ai-drawer-open {
-  grid-template-columns: 64px minmax(0, 1fr) minmax(320px, min(440px, 38vw));
+  grid-template-columns: 64px minmax(0, 1fr) 6px
+    minmax(320px, var(--ai-drawer-width, min(440px, 38vw)));
 }
+.ai-drawer-split {
+  align-self: stretch;
+  width: 6px;
+  background: var(--line-soft);
+  cursor: col-resize;
+  transition: background 0.15s;
+}
+.ai-drawer-split:hover,
+.ai-drawer-split.dragging,
+.ai-drawer-split:focus-visible { background: var(--accent); outline: none; }
 .ai-drawer {
   display: none;
   min-width: 0;
@@ -1941,9 +1969,24 @@ button, input, select { font-family: inherit; font-size: inherit; color: inherit
   color: var(--text-mute);
 }
 
-/* ---------------- account menu (右上角头像) ---------------- */
+/* ---------------- account menu (侧边栏底部头像) ---------------- */
 
 .account-menu { position: relative; }
+.sidebar-account-trigger { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.sidebar-account-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-dim);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sidebar-account-menu .account-pop {
+  top: auto;
+  right: auto;
+  bottom: calc(100% + 9px);
+  left: 0;
+}
 
 .avatar-btn {
   width: 34px; height: 34px;
@@ -2407,7 +2450,7 @@ button, input, select { font-family: inherit; font-size: inherit; color: inherit
   .app { grid-template-columns: 64px minmax(0, 1fr); }
   .app:not(.sidebar-expanded) .sidebar-toggle { align-self: center; }
   .app:not(.sidebar-expanded) .sidebar-toggle svg { transform: rotate(180deg); }
-  .brand-text, .nav-text, .engine-row, .engine-card p, .theme-btn { display: none; }
+  .brand-text, .nav-text, .engine-row, .engine-card p { display: none; }
   .sidebar { padding: 18px 8px 16px; align-items: center; }
   .nav { width: 100%; }
   .nav-item { justify-content: center; padding: 9px 0; }
@@ -2423,6 +2466,19 @@ button, input, select { font-family: inherit; font-size: inherit; color: inherit
     font-size: 0;
   }
   .engine-setup::before { content: "⚙"; font-size: 16px; }
+  .sidebar-foot { width: 100%; align-items: center; }
+  .theme-btn {
+    display: grid;
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    margin: 0 auto;
+    place-items: center;
+  }
+  .theme-btn #themeLabel { display: none; }
+  .sidebar-account-menu { width: 40px; }
+  .sidebar-account-trigger { flex-direction: column; gap: 4px; }
+  .sidebar-account-name { max-width: 48px; font-size: 9px; text-align: center; }
 
   .workbench, .compare-layout { grid-template-columns: 1fr !important; height: auto; }
   .workbench-split { display: none; }
@@ -2464,11 +2520,22 @@ button, input, select { font-family: inherit; font-size: inherit; color: inherit
 
   .app.sidebar-expanded:not(.sidebar-collapsed) { grid-template-columns: 236px minmax(0, 1fr); }
   .app.sidebar-expanded .sidebar { padding: 18px 14px 20px; align-items: stretch; }
+  .app.sidebar-expanded .sidebar-foot { width: auto; align-items: stretch; }
   .app.sidebar-expanded .sidebar-toggle { align-self: flex-end; }
   .app.sidebar-expanded .sidebar-toggle svg { transform: none; }
   .app.sidebar-expanded .brand-text,
   .app.sidebar-expanded .engine-row,
-  .app.sidebar-expanded .theme-btn { display: flex; }
+  .app.sidebar-expanded .theme-btn {
+    display: flex;
+    width: auto;
+    height: auto;
+    margin: 0;
+    padding: 8px 10px;
+  }
+  .app.sidebar-expanded .theme-btn #themeLabel { display: inline; }
+  .app.sidebar-expanded .sidebar-account-menu { width: auto; }
+  .app.sidebar-expanded .sidebar-account-trigger { flex-direction: row; gap: 9px; }
+  .app.sidebar-expanded .sidebar-account-name { max-width: none; font-size: 12px; text-align: left; }
   .app.sidebar-expanded .engine-card p { display: block; }
   .app.sidebar-expanded .nav-text { display: inline; }
   .app.sidebar-expanded .nav-item { justify-content: flex-start; padding: 9px 11px; }
@@ -2491,10 +2558,12 @@ button, input, select { font-family: inherit; font-size: inherit; color: inherit
   .app.sidebar-expanded .nav-item[data-tip]:focus-visible::before { display: none; }
 
   .app.ai-drawer-open:not(.sidebar-expanded) {
-    grid-template-columns: 64px minmax(0, 1fr) minmax(280px, 42vw);
+    grid-template-columns: 64px minmax(0, 1fr) 6px
+      minmax(280px, var(--ai-drawer-width, 42vw));
   }
   .app.ai-drawer-open.sidebar-expanded:not(.sidebar-collapsed) {
-    grid-template-columns: 236px minmax(0, 1fr) minmax(280px, 42vw);
+    grid-template-columns: 236px minmax(0, 1fr) 6px
+      minmax(280px, var(--ai-drawer-width, 42vw));
   }
 }
 

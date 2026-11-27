@@ -289,7 +289,7 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !$("authGate").hidden) dismissAuthGate();
 });
 
-/* ---- 右上角头像菜单 ---- */
+/* ---- 侧边栏底部头像菜单 ---- */
 
 function closeAccountPop() {
   $("accountPop").hidden = true;
@@ -399,11 +399,15 @@ function renderAccountCard() {
   const set = (id, text) => { const n = $(id); if (n) n.textContent = text; };
   set("accountAvatar", letter);
   set("popAvatar", letter);
+  set("sidebarAccountName", signedIn ? S.user.username : "登录 / 注册");
+
+  const accountName = $("sidebarAccountName");
+  if (accountName) accountName.title = signedIn ? S.user.username : "登录 / 注册";
 
   const btn = $("avatarBtn");
   if (btn) {
     btn.classList.toggle("anon", !signedIn);
-    btn.title = signedIn ? `${name} · 账号菜单` : "登录 / 注册";
+    btn.title = signedIn ? `${name}（${S.user.username}）· 账号菜单` : "登录 / 注册";
   }
 
   const anon = $("accountPopAnon");
@@ -561,6 +565,81 @@ function activeViewName() {
   return active ? active.dataset.view : "";
 }
 
+const AI_DRAWER_WIDTH_KEY = "mesoscope-ai-drawer-width";
+let syncAiDrawerSplit = () => {};
+
+(function initAiDrawerSplit() {
+  const app = document.querySelector(".app");
+  const drawer = $("aiDrawer");
+  const bar = $("aiDrawerSplit");
+  if (!app || !drawer || !bar) return;
+
+  let preferredWidth = null;
+  let currentWidth = 0;
+  try {
+    const saved = parseFloat(localStorage.getItem(AI_DRAWER_WIDTH_KEY));
+    if (Number.isFinite(saved)) preferredWidth = saved;
+  } catch (_) { }
+
+  const applyWidth = (width) => {
+    if (!app.classList.contains("ai-drawer-open") || !app.clientWidth) return;
+    const narrow = window.matchMedia("(max-width: 1100px)").matches;
+    const sidebarWidth = app.classList.contains("sidebar-collapsed") ? 64 : 236;
+    const minWidth = narrow ? 280 : 320;
+    const maxWidth = Math.max(minWidth, Math.min(
+      600,
+      app.clientWidth - sidebarWidth - 6 - 320,
+    ));
+    currentWidth = Math.min(maxWidth, Math.max(minWidth, width));
+    app.style.setProperty("--ai-drawer-width", `${currentWidth}px`);
+    bar.setAttribute("aria-valuemin", String(minWidth));
+    bar.setAttribute("aria-valuemax", String(Math.round(maxWidth)));
+    bar.setAttribute("aria-valuenow", String(Math.round(currentWidth)));
+  };
+
+  const sync = () => {
+    if (!app.classList.contains("ai-drawer-open")) {
+      bar.hidden = true;
+      return;
+    }
+    bar.hidden = false;
+    if (preferredWidth === null) app.style.removeProperty("--ai-drawer-width");
+    const defaultWidth = drawer.getBoundingClientRect().width || 360;
+    applyWidth(preferredWidth === null ? defaultWidth : preferredWidth);
+  };
+  syncAiDrawerSplit = sync;
+
+  let dragging = false;
+  bar.addEventListener("pointerdown", (event) => {
+    dragging = true;
+    bar.setPointerCapture(event.pointerId);
+    bar.classList.add("dragging");
+    event.preventDefault();
+  });
+  bar.addEventListener("pointermove", (event) => {
+    if (!dragging) return;
+    const rect = app.getBoundingClientRect();
+    applyWidth(rect.right - event.clientX - bar.offsetWidth / 2);
+  });
+  const stopDragging = () => {
+    if (!dragging) return;
+    dragging = false;
+    bar.classList.remove("dragging");
+    preferredWidth = currentWidth;
+    try { localStorage.setItem(AI_DRAWER_WIDTH_KEY, String(currentWidth)); } catch (_) { }
+  };
+  bar.addEventListener("pointerup", stopDragging);
+  bar.addEventListener("pointercancel", stopDragging);
+  bar.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    applyWidth(currentWidth + (event.key === "ArrowLeft" ? 16 : -16));
+    preferredWidth = currentWidth;
+    try { localStorage.setItem(AI_DRAWER_WIDTH_KEY, String(currentWidth)); } catch (_) { }
+  });
+  window.addEventListener("resize", sync);
+})();
+
 function syncAiLauncher() {
   const launcher = $("aiLauncher");
   const open = document.querySelector(".app").classList.contains("ai-drawer-open");
@@ -577,6 +656,7 @@ function openAiDrawer() {
   $("aiDrawerContent").append($("view-ask"));
   $("view-ask").classList.add("active");
   app.classList.add("ai-drawer-open");
+  syncAiDrawerSplit();
   syncAiLauncher();
   requestAnimationFrame(() => $("askInput").focus());
 }
@@ -586,6 +666,7 @@ function closeAiDrawer() {
   if (!app.classList.contains("ai-drawer-open")) return;
   $("askViewSlot").append($("view-ask"));
   $("view-ask").classList.toggle("active", activeViewName() === "ask");
+  $("aiDrawerSplit").hidden = true;
   app.classList.remove("ai-drawer-open");
   syncAiLauncher();
 }
@@ -709,6 +790,7 @@ on("sidebarToggle", "click", () => {
   app.classList.toggle("sidebar-expanded", expanded);
   app.classList.toggle("sidebar-collapsed", !expanded);
   syncSidebarToggle();
+  syncAiDrawerSplit();
 });
 window.addEventListener("resize", syncSidebarToggle);
 syncSidebarToggle();
@@ -4028,9 +4110,10 @@ async function loadJobs() {
         <td>${esc(j.model || "—")}</td>
         <td class="num">${j.n_records}</td>
         <td title="${esc((j.issues || []).join(" / ") || j.message)}">${esc((j.issues || [])[0] || j.message || "—")}</td>
-        <td>${esc((j.created_at || "").replace("T", " ").slice(0, 16))}</td>
+        <td>${esc(formatStamp(j.created_at) || "—")}</td>
+        <td>${esc(formatStamp(j.finished_at) || "—")}</td>
       </tr>`).join("")
-    : '<tr><td colspan="8"><div class="placeholder">还没有任务记录。</div></td></tr>';
+    : '<tr><td colspan="9"><div class="placeholder">还没有任务记录。</div></td></tr>';
 }
 
 bindBriefHover($("jobTable"));
